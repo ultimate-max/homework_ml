@@ -1,0 +1,10 @@
+name: frictionest
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pytorch>=2.0
+  - cpuonly
+  - numpy
+  - pytest
