@@ -47,7 +47,11 @@ def main() -> None:
     p.add_argument("--T", type=int, default=4000, help="无 --data 时轨迹长度")
     p.add_argument("--batch", type=int, default=256)
     p.add_argument("--data", type=Path, default=None, help="generate_dataset.py 输出的 .npz")
+    p.add_argument("--save-dir", type=Path, default=ROOT / "checkpoints", help="模型保存目录")
+    p.add_argument("--save-name", type=str, default="mysteric_net", help="模型保存名称")
     args = p.parse_args()
+
+    args.save_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -103,6 +107,18 @@ def main() -> None:
         tau_hat, _, _, _, _ = model(qi[:512], qdi[:512], qddi[:512], q_seq[:512], qd_seq[:512])
         rmse = torch.sqrt(torch.mean((tau_hat - taui[:512]) ** 2)).item()
         print(f"RMSE torque (subset): {rmse:.5f}")
+
+    # 保存模型
+    save_path = args.save_dir / f"{args.save_name}.pt"
+    torch.save({
+        'epoch': args.epochs,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': opt.state_dict(),
+        'dof': dof,
+        'seq_len': seq_len,
+        'rmse': rmse,
+    }, save_path)
+    print(f"模型已保存: {save_path}")
 
 
 if __name__ == "__main__":
