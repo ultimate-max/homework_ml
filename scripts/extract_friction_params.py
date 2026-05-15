@@ -64,58 +64,66 @@ def extract_hnet_params(model: MystericNet, device: torch.device) -> dict:
     return hnet_params
 
 
+def _serialize_sequential(name: str, seq: torch.nn.Sequential) -> dict:
+    out: dict = {"name": name, "layers": []}
+    for i, layer in enumerate(seq):
+        if isinstance(layer, torch.nn.Linear):
+            out["layers"].append(
+                {
+                    "index": i,
+                    "type": "Linear",
+                    "in_features": layer.in_features,
+                    "out_features": layer.out_features,
+                    "weight": layer.weight.detach().cpu().numpy().tolist(),
+                    "bias": layer.bias.detach().cpu().numpy().tolist() if layer.bias is not None else None,
+                }
+            )
+        elif isinstance(layer, torch.nn.ReLU):
+            out["layers"].append({"index": i, "type": "ReLU", "inplace": getattr(layer, "inplace", False)})
+        elif isinstance(layer, torch.nn.Tanh):
+            out["layers"].append({"index": i, "type": "Tanh"})
+    return out
+
+
+def _serialize_linear(name: str, lin: torch.nn.Linear) -> dict:
+    return {
+        "name": name,
+        "type": "Linear",
+        "in_features": lin.in_features,
+        "out_features": lin.out_features,
+        "weight": lin.weight.detach().cpu().numpy().tolist(),
+        "bias": lin.bias.detach().cpu().numpy().tolist() if lin.bias is not None else None,
+    }
+
+
 def extract_lnet_params(model: MystericNet, device: torch.device) -> dict:
-    """提取L-Net的参数（刚体部分）"""
-    lnet_params = {}
-    
-    # Mass network参数
-    lnet_params['mass_network'] = {
-        'hidden_dim': model.lnet._mass_head[0].in_features if len(model.lnet._mass_head) > 0 else 32,
-        'output_dim': model.lnet._mass_head[-1].out_features,
-        'layers': []
+    """提取 L-Net（DeLaN：共享 layers + net_ld / net_lo / net_g）参数。"""
+    ln = model.lnet
+    lnet_params: dict = {
+        "shared_layers": [_serialize_lagrangian_layer(f"layer_{i}", layer) for i, layer in enumerate(ln.layers)],
+        "net_ld": _serialize_lagrangian_layer("net_ld", ln.net_ld),
+        "net_g": _serialize_lagrangian_layer("net_g", ln.net_g),
+        "structure": {
+            "dof": model.dof,
+            "b_diagonal": ln.b_diagonal,
+            "diagonal_epsilon": ln.diagonal_epsilon,
+            "total_parameters": sum(p.numel() for p in ln.parameters()),
+        },
     }
-    
-    for i, layer in enumerate(model.lnet._mass_head):
-        if isinstance(layer, torch.nn.Linear):
-            layer_params = {
-                'index': i,
-                'in_features': layer.in_features,
-                'out_features': layer.out_features,
-                'weight': layer.weight.detach().cpu().numpy().tolist(),
-                'bias': layer.bias.detach().cpu().numpy().tolist() if layer.bias is not None else None
-            }
-            lnet_params['mass_network']['layers'].append(layer_params)
-        elif isinstance(layer, torch.nn.Tanh):
-            lnet_params['mass_network']['layers'].append({'index': i, 'type': 'Tanh'})
-    
-    # Potential network参数
-    lnet_params['potential_network'] = {
-        'hidden_dim': model.lnet._pot_head[0].in_features if len(model.lnet._pot_head) > 0 else 32,
-        'output_dim': model.lnet._pot_head[-1].out_features,
-        'layers': []
-    }
-    
-    for i, layer in enumerate(model.lnet._pot_head):
-        if isinstance(layer, torch.nn.Linear):
-            layer_params = {
-                'index': i,
-                'in_features': layer.in_features,
-                'out_features': layer.out_features,
-                'weight': layer.weight.detach().cpu().numpy().tolist(),
-                'bias': layer.bias.detach().cpu().numpy().tolist() if layer.bias is not None else None
-            }
-            lnet_params['potential_network']['layers'].append(layer_params)
-        elif isinstance(layer, torch.nn.Tanh):
-            lnet_params['potential_network']['layers'].append({'index': i, 'type': 'Tanh'})
-    
-    # 网络结构信息
-    lnet_params['structure'] = {
-        'dof': model.dof,
-        'mass_diag_eps': model.lnet.mass_diag_eps,
-        'total_parameters': sum(p.numel() for p in model.lnet.parameters())
-    }
-    
+    if ln.net_lo is not None:
+        lnet_params["net_lo"] = _serialize_lagrangian_layer("net_lo", ln.net_lo)
+    else:
+        lnet_params["net_lo"] = None
     return lnet_params
+
+
+def _serialize_lagrangian_layer(name: str, layer) -> dict:
+    return {
+        "name": name,
+        "n_out": layer.n_out,
+        "weight": layer.weight.detach().cpu().numpy().tolist(),
+        "bias": layer.bias.detach().cpu().numpy().tolist(),
+    }
 
 
 def load_model(model_path: Path, device: torch.device) -> tuple[MystericNet, dict]:

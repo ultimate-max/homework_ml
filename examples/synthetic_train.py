@@ -85,9 +85,9 @@ def main() -> None:
             q_seq_b = q_seq[idx]
             qd_seq_b = qd_seq[idx]
 
-            tau_hat, _core, tau_fri_hat, _Mb, gb = model(qb, qdb, qddb, q_seq_b, qd_seq_b)
+            tau_hat, _core, tau_fri_hat, _H_hat, g_hat = model(qb, qdb, qddb, q_seq_b, qd_seq_b)
             if args.energy_loss:
-                lt, ltau, lE = mysteric_losses(model.lnet, tau_hat, taub, tau_fri_hat, qb, qdb, qddb, gb)
+                lt, ltau, lE = mysteric_losses(model.lnet, tau_hat, taub, tau_fri_hat, qb, qdb, qddb, g_hat)
             else:
                 ltau = torch.mean((tau_hat - taub) ** 2)
                 lt = ltau
@@ -104,7 +104,7 @@ def main() -> None:
             print(f"epoch {epoch+1:03d}  {tag}  l={loss_acc/max(steps,1):.5f}")
 
     with torch.no_grad():
-        tau_hat, _, _, _, _ = model(qi[:512], qdi[:512], qddi[:512], q_seq[:512], qd_seq[:512])
+        tau_hat, _, _, _, _g = model(qi[:512], qdi[:512], qddi[:512], q_seq[:512], qd_seq[:512])
         rmse = torch.sqrt(torch.mean((tau_hat - taui[:512]) ** 2)).item()
         print(f"RMSE torque (subset): {rmse:.5f}")
 

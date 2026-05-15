@@ -87,7 +87,7 @@ def main() -> None:
     # 评估模型
     print("\n开始评估...")
     with torch.no_grad():
-        tau_hat, tau_core_hat, tau_fri_hat, M_hat, g_hat = model(qi, qdi, qddi, q_seq, qd_seq)
+        tau_hat, tau_core_hat, tau_fri_hat, H_hat, g_hat = model(qi, qdi, qddi, q_seq, qd_seq)
 
     # 计算各项指标
     tau_error = tau_hat - taui
