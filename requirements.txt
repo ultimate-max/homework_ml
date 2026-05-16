@@ -1,1 +1,13 @@
-torch>=2.0.0
+# DeLaN_Stribeck / Mysteric-Net
+# 须在已激活的 conda 环境中安装: pip install -r requirements.txt
+#
+# PyTorch 须从官方 CUDA 轮子源安装（勿用 conda 的 cpuonly，否则无 GPU）。
+# 与 DeLaN 环境一致: cu121（WSL + RTX 3090 已验证）
+
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch>=2.3.0,<2.6.0
+
+numpy>=1.24.0
+dill>=0.3.7
+pytest>=7.0.0
+matplotlib>=3.7.0

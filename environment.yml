@@ -1,10 +1,16 @@
+# 创建: conda env create -f environment.yml
+# 更新: conda env update -f environment.yml --prune
+#
+# PyTorch 带 CUDA，通过 pip + cu121 安装（见 requirements.txt）。
+# 勿在此文件中加入 conda 的 pytorch / cpuonly，否则会覆盖 pip 版且 torch.cuda 为 False。
+
 name: frictionest
 channels:
-  - pytorch
   - conda-forge
 dependencies:
   - python=3.11
-  - pytorch>=2.0
-  - cpuonly
   - numpy
   - pytest
+  - pip
+  - pip:
+      - -r requirements.txt

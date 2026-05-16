@@ -59,6 +59,19 @@ class LinearDer(nn.Module):
         return torch.clamp(x, 1.0, 1.0)
 
 
+class SoftplusDer(nn.Module):
+    """Softplus 导数 sigmoid(beta * x)，与官方 DeLaN 一致。"""
+
+    def __init__(self, beta: float = 1.0) -> None:
+        super().__init__()
+        self._beta = beta
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        cx = torch.clamp(x, -20.0, 20.0)
+        exp_x = torch.exp(self._beta * cx)
+        return exp_x / (exp_x + 1.0)
+
+
 class LagrangianLayer(nn.Module):
     """
     DeLaN 专用层：一次前向同时得到
@@ -75,14 +88,17 @@ class LagrangianLayer(nn.Module):
         self.weight = nn.Parameter(torch.empty(n_out, input_size))
         self.bias = nn.Parameter(torch.empty(n_out))
 
-        if activation == "ReLu":
+        if activation in ("ReLu", "ReLU"):
             self.g = nn.ReLU()
             self.g_prime = ReLUDer()
+        elif activation == "SoftPlus":
+            self.g = nn.Softplus(beta=1.0)
+            self.g_prime = SoftplusDer(beta=1.0)
         elif activation == "Linear":
             self.g = LinearAct()
             self.g_prime = LinearDer()
         else:
-            raise ValueError(f"unsupported activation: {activation}")
+            raise ValueError(f"unsupported activation: {activation!r}")
     # 单层拉格朗日层的前向传播，计算输出和雅可比
     def forward(self, q: torch.Tensor, der_prev: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # 仿射变换 a = W q + b（F.linear 里 weight 形状是 out_features × in_features）

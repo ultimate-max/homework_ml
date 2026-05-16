@@ -88,7 +88,8 @@ class LNet(nn.Module):
         b_diagonal: float = 1.0e-2,
         *,
         numerical_H_ridge: float = 1.0e-2,
-        b_init: float = 0.1,
+        b_init: float = 1.0e-3,
+        activation: str = "SoftPlus",
     ) -> None:
         # super().__init__() 必须调用，才能正确注册下面的层和参数
         super().__init__()
@@ -108,11 +109,12 @@ class LNet(nn.Module):
         # ModuleList 类似 list，但 PyTorch 能识别其中的层并训练其参数
         self.layers = nn.ModuleList()
         # 第 1 层：输入维度 = 关节数 dof，输出 = hidden_dim
-        self.layers.append(LagrangianLayer(dof, hidden_dim, activation="ReLu"))
+        act = activation
+        self.layers.append(LagrangianLayer(dof, hidden_dim, activation=act))
         init_hidden(self.layers[0], b_init=b_init)
         # 其余隐藏层：hidden_dim -> hidden_dim
         for _ in range(1, num_hidden_layers):
-            layer = LagrangianLayer(hidden_dim, hidden_dim, activation="ReLu")
+            layer = LagrangianLayer(hidden_dim, hidden_dim, activation=act)
             init_hidden(layer, b_init=b_init)
             self.layers.append(layer)
 
@@ -243,6 +245,13 @@ class LNet(nn.Module):
     def inv_dyn(self, q: torch.Tensor, qd: torch.Tensor, qdd: torch.Tensor) -> torch.Tensor:
         """逆动力学：已知运动 (q,qd,qdd)，求力矩 tau。"""
         return self._dyn_model(q, qd, qdd).tau
+
+    def forward_delan(
+        self, q: torch.Tensor, qd: torch.Tensor, qdd: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """与官方 ``DeepLagrangianNetwork.forward`` 一致：返回 (tau, dE/dt)。"""
+        dyn = self._dyn_model(q, qd, qdd)
+        return dyn.tau, dyn.dTdt + dyn.dVdt
 
     def forward(self, q: torch.Tensor, qd: torch.Tensor, qdd: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
