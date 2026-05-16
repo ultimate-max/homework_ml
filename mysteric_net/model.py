@@ -1,19 +1,26 @@
 """
-Mysteric-Net (Yeo 等, Eq. (4)): 刚体部分用 DeLaN 式 (6) 的 L-Net + 摩擦 H-Net。
+Mysteric-Net: DeLaN 刚体 (L-Net) + 摩擦子网络 (H-Net)。
 
   tau_hat = tau_rigid + tau_fri
-  tau_rigid = H_hat(q) q_ddot + B_c + g_hat(q)   （与 Lutter 等 2019 式 (6) 一致）
+
+摩擦后端 ``friction_backend``:
+  - ``tcn``: 原论文 TCN（Yeo 等）
+  - ``stribeck``: 可学习 SCV 物理模型（Hu 等 Eq. (4)）
+  - ``stribeck_pinn``: MLP + SCV 物理约束（Hu 等 PINN, Eq. (6)）
 """
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Literal, Tuple
 
 import torch
 import torch.nn as nn
 
 from .hnet import HNetTCN
 from .lnet import LNet
+from .stribeck import HNetStribeck, HNetStribeckPINN
+
+FrictionBackend = Literal["tcn", "stribeck", "stribeck_pinn"]
 
 
 class MystericNet(nn.Module):
@@ -28,10 +35,15 @@ class MystericNet(nn.Module):
         mass_diag_eps: float = 1.0e-2,
         *,
         lnet_numerical_H_ridge: float = 1.0e-2,
+        friction_backend: FrictionBackend = "tcn",
+        stribeck_hidden: Tuple[int, ...] = (128, 64),
+        stribeck_dropout: float = 0.0,
+        scv_variant: Literal["scv", "cv"] = "scv",
     ) -> None:
         super().__init__()
         self.dof = dof
         self.seq_len = seq_len
+        self.friction_backend: FrictionBackend = friction_backend
         self.lnet = LNet(
             dof,
             hidden_dim=lnet_hidden,
@@ -39,7 +51,21 @@ class MystericNet(nn.Module):
             b_diagonal=mass_diag_eps,
             numerical_H_ridge=lnet_numerical_H_ridge,
         )
-        self.hnet = HNetTCN(dof, seq_len=seq_len, hidden_channels=hnet_channels, kernel_size=hnet_kernel)
+        if friction_backend == "tcn":
+            self.hnet = HNetTCN(
+                dof, seq_len=seq_len, hidden_channels=hnet_channels, kernel_size=hnet_kernel
+            )
+        elif friction_backend == "stribeck":
+            self.hnet = HNetStribeck(dof, model=scv_variant)
+        elif friction_backend == "stribeck_pinn":
+            self.hnet = HNetStribeckPINN(
+                dof,
+                seq_len=seq_len,
+                hidden=stribeck_hidden,
+                dropout=stribeck_dropout,
+            )
+        else:
+            raise ValueError(f"未知 friction_backend={friction_backend!r}")
 
     def forward(
         self,
@@ -48,19 +74,21 @@ class MystericNet(nn.Module):
         qdd: torch.Tensor,
         q_seq: torch.Tensor,
         qd_seq: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """
-        q, qd, qdd: 关节空间状态 (B, dof)，供 L-Net（DeLaN 逆模型）。
-        q_seq, qd_seq: (B, L, dof)，供 H-Net（论文式 (8)）。
-
         Returns:
-            tau_hat:   (B, dof)
-            tau_core:  (B, dof) 刚体逆动力项（DeLaN 式 (6)）
-            tau_fri:   (B, dof)
-            H_hat:     (B, dof, dof) 惯性矩阵（论文记号 H；部分文献记作 M）
-            g_hat:     (B, dof) 论文第三头 g_hat(q; psi)
+            tau_hat, tau_core, tau_fri, H_hat, g_hat, tau_fri_physics
+            ``tau_fri_physics`` 仅在 ``stribeck_pinn`` 时为 SCV 输出，否则为 ``None``。
         """
         tau_core, H_hat, g_hat = self.lnet(q, qd, qdd)
-        tau_fri = self.hnet(q_seq, qd_seq)
+        tau_fri_physics: torch.Tensor | None = None
+
+        if self.friction_backend == "tcn":
+            tau_fri = self.hnet(q_seq, qd_seq)
+        elif self.friction_backend == "stribeck":
+            tau_fri, _ = self.hnet(q_seq, qd_seq)
+        else:
+            tau_fri, tau_fri_physics = self.hnet(q_seq, qd_seq)
+
         tau_hat = tau_core + tau_fri
-        return tau_hat, tau_core, tau_fri, H_hat, g_hat
+        return tau_hat, tau_core, tau_fri, H_hat, g_hat, tau_fri_physics

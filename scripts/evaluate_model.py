@@ -48,7 +48,8 @@ def load_model(model_path: Path, device: torch.device) -> MystericNet:
     dof = checkpoint.get('dof', 2)
     seq_len = checkpoint.get('seq_len', 30)
     
-    model = MystericNet(dof=dof, seq_len=seq_len).to(device)
+    backend = checkpoint.get("friction_backend", "tcn")
+    model = MystericNet(dof=dof, seq_len=seq_len, friction_backend=backend).to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
@@ -87,7 +88,9 @@ def main() -> None:
     # 评估模型
     print("\n开始评估...")
     with torch.no_grad():
-        tau_hat, tau_core_hat, tau_fri_hat, H_hat, g_hat = model(qi, qdi, qddi, q_seq, qd_seq)
+        tau_hat, tau_core_hat, tau_fri_hat, H_hat, g_hat, _ = model(
+            qi, qdi, qddi, q_seq, qd_seq
+        )
 
     # 计算各项指标
     tau_error = tau_hat - taui

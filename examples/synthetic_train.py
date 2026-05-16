@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from mysteric_net.friction_losses import friction_pinn_loss
 from mysteric_net.losses import mysteric_losses
 from mysteric_net.model import MystericNet
 from mysteric_net.synthetic_plant import simulate_2dof_inverse_dynamics
@@ -49,6 +50,12 @@ def main() -> None:
     p.add_argument("--data", type=Path, default=None, help="generate_dataset.py 输出的 .npz")
     p.add_argument("--save-dir", type=Path, default=ROOT / "checkpoints", help="模型保存目录")
     p.add_argument("--save-name", type=str, default="mysteric_net", help="模型保存名称")
+    p.add_argument(
+        "--friction-backend",
+        choices=("tcn", "stribeck", "stribeck_pinn"),
+        default="tcn",
+    )
+    p.add_argument("--lambda-physics", type=float, default=0.5)
     args = p.parse_args()
 
     args.save_dir.mkdir(parents=True, exist_ok=True)
@@ -65,7 +72,9 @@ def main() -> None:
         d = simulate_2dof_inverse_dynamics(T=args.T, seq_len=seq_len, device=device)
         qi, qdi, qddi, taui, q_seq, qd_seq = d["qi"], d["qdi"], d["qddi"], d["taui"], d["q_seq"], d["qd_seq"]
 
-    model = MystericNet(dof=dof, seq_len=seq_len).to(device)
+    model = MystericNet(dof=dof, seq_len=seq_len, friction_backend=args.friction_backend).to(
+        device
+    )
     opt = torch.optim.Adam(model.parameters(), lr=7.0e-4, weight_decay=1.0e-5)
 
     B = args.batch
@@ -85,12 +94,27 @@ def main() -> None:
             q_seq_b = q_seq[idx]
             qd_seq_b = qd_seq[idx]
 
-            tau_hat, _core, tau_fri_hat, _H_hat, g_hat = model(qb, qdb, qddb, q_seq_b, qd_seq_b)
+            tau_hat, _core, tau_fri_hat, _H_hat, g_hat, tau_phys = model(
+                qb, qdb, qddb, q_seq_b, qd_seq_b
+            )
+            if args.friction_backend == "stribeck_pinn" and tau_phys is not None:
+                tau_fri_true = taub - _core.detach()
+                lf, _, _ = friction_pinn_loss(
+                    tau_fri_hat,
+                    tau_fri_true,
+                    tau_phys,
+                    lambda_physics=args.lambda_physics,
+                )
+            else:
+                lf = torch.zeros((), device=device, dtype=qb.dtype)
             if args.energy_loss:
-                lt, ltau, lE = mysteric_losses(model.lnet, tau_hat, taub, tau_fri_hat, qb, qdb, qddb, g_hat)
+                lt, ltau, lE = mysteric_losses(
+                    model.lnet, tau_hat, taub, tau_fri_hat, qb, qdb, qddb, g_hat
+                )
+                lt = lt + lf
             else:
                 ltau = torch.mean((tau_hat - taub) ** 2)
-                lt = ltau
+                lt = ltau + lf
 
             opt.zero_grad(set_to_none=True)
             lt.backward()
@@ -104,7 +128,9 @@ def main() -> None:
             print(f"epoch {epoch+1:03d}  {tag}  l={loss_acc/max(steps,1):.5f}")
 
     with torch.no_grad():
-        tau_hat, _, _, _, _g = model(qi[:512], qdi[:512], qddi[:512], q_seq[:512], qd_seq[:512])
+        tau_hat, _, _, _, _g, _ = model(
+            qi[:512], qdi[:512], qddi[:512], q_seq[:512], qd_seq[:512]
+        )
         rmse = torch.sqrt(torch.mean((tau_hat - taui[:512]) ** 2)).item()
         print(f"RMSE torque (subset): {rmse:.5f}")
 
@@ -116,6 +142,7 @@ def main() -> None:
         'optimizer_state_dict': opt.state_dict(),
         'dof': dof,
         'seq_len': seq_len,
+        'friction_backend': args.friction_backend,
         'rmse': rmse,
     }, save_path)
     print(f"模型已保存: {save_path}")

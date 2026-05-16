@@ -31,14 +31,14 @@ def suggest_hyper(n_dof: int, n_train_samples: int, *, base: str = "delan_model"
     else:
         h = {
             "n_width": 64,
-            "n_depth": 2,
+            "n_depth": 8,
             "diagonal_epsilon": 0.01,
             "activation": "SoftPlus",
             "b_init": 1.0e-4,
             "b_diag_init": 0.001,
             "learning_rate": 5.0e-4,
             "weight_decay": 1.0e-5,
-            "max_epoch": 10000,
+            "max_epoch": 1000,
         }
 
     # Cholesky 参数个数 m = n(n+1)/2；略增宽度以覆盖更大惯性矩阵

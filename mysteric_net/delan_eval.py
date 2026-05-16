@@ -126,6 +126,16 @@ def print_eval_report(result: DeLaNEvalResult, *, has_mcg_ground_truth: bool = T
     print(f"      Comp Time per Sample = {result.t_eval_per_sample:.3e}s / {hz:.1f}Hz")
 
 
+def _joint_ylim(gt_col: np.ndarray, pred_col: np.ndarray) -> tuple[float, float]:
+    both = np.concatenate([np.asarray(gt_col).ravel(), np.asarray(pred_col).ravel()])
+    lo, hi = float(np.min(both)), float(np.max(both))
+    span = hi - lo
+    if span < 1e-9:
+        return lo - 0.01, hi + 0.01
+    margin = 0.12 * span + 1e-6
+    return lo - margin, hi + margin
+
+
 def plot_delan_performance(
     result: DeLaNEvalResult,
     test_labels: Sequence[str],
@@ -139,123 +149,55 @@ def plot_delan_performance(
     save_path: Path | None = None,
     seed: int | None = None,
 ) -> None:
+    """测试集力矩分解图：每行一个关节，四列 tau / m / c / g（任意 n_dof）。"""
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
 
     plot_alpha = 0.8
     color_pred = "r"
-
-    y_t_low = np.clip(1.2 * np.min(np.vstack((test_tau, result.delan_tau)), axis=0), -np.inf, -0.01)
-    y_t_max = np.clip(1.5 * np.max(np.vstack((test_tau, result.delan_tau)), axis=0), 0.01, np.inf)
-    y_m_low = np.clip(1.2 * np.min(np.vstack((test_m, result.delan_m)), axis=0), -np.inf, -0.01)
-    y_m_max = np.clip(1.2 * np.max(np.vstack((test_m, result.delan_m)), axis=0), 0.01, np.inf)
-    y_c_low = np.clip(1.2 * np.min(np.vstack((test_c, result.delan_c)), axis=0), -np.inf, -0.01)
-    y_c_max = np.clip(1.2 * np.max(np.vstack((test_c, result.delan_c)), axis=0), 0.01, np.inf)
-    y_g_low = np.clip(1.2 * np.min(np.vstack((test_g, result.delan_g)), axis=0), -np.inf, -0.01)
-    y_g_max = np.clip(1.2 * np.max(np.vstack((test_g, result.delan_g)), axis=0), 0.01, np.inf)
-
+    n_dof = int(test_tau.shape[1])
     div = list(divider)
     ticks = (np.array(div[:-1]) + np.array(div[1:])) / 2.0
 
+    panels = (
+        ("tau", test_tau, result.delan_tau),
+        ("H(q) * q_ddot", test_m, result.delan_m),
+        ("c(q, q_dot)", test_c, result.delan_c),
+        ("g(q)", test_g, result.delan_g),
+    )
+
     title = f"Seed = {seed}" if seed is not None else "DeLaN L-Net"
-    fig = plt.figure(figsize=(24.0 / 1.54, 8.0 / 1.54), dpi=100)
-    fig.subplots_adjust(left=0.08, bottom=0.12, right=0.98, top=0.95, wspace=0.3, hspace=0.2)
-    fig.canvas.manager.set_window_title(title)
+    fig_h = max(4.0, 2.2 * n_dof)
+    fig, axes = plt.subplots(n_dof, 4, figsize=(20.0, fig_h), dpi=100, squeeze=False)
+    fig.subplots_adjust(left=0.06, bottom=0.08, right=0.98, top=0.92, wspace=0.28, hspace=0.35)
+    if hasattr(fig.canvas, "manager") and fig.canvas.manager is not None:
+        fig.canvas.manager.set_window_title(title)
 
     legend = [
         mpatches.Patch(color=color_pred, label="DeLaN"),
         mpatches.Patch(color="k", label="Ground Truth"),
     ]
 
-    def _style_joint_axes(ax0, ax1, ylo, yhi, panel: str | None = None) -> None:
-        for ax, j in zip((ax0, ax1), (0, 1)):
-            ax.set_ylim(ylo[j], yhi[j])
-            ax.set_xticks(ticks)
-            ax.set_xticklabels(test_labels)
-            ax.vlines(div, ylo[j], yhi[j], linestyles="--", lw=0.5, alpha=1.0)
+    for j in range(n_dof):
+        for col, (col_title, gt, pred) in enumerate(panels):
+            ax = axes[j, col]
+            ylo, yhi = _joint_ylim(gt[:, j], pred[:, j])
+            ax.set_ylim(ylo, yhi)
             ax.set_xlim(div[0], div[-1])
-        if panel:
-            ax1.text(
-                s=panel,
-                x=0.5,
-                y=-0.25,
-                fontsize=12,
-                fontweight="bold",
-                horizontalalignment="center",
-                verticalalignment="center",
-                transform=ax1.transAxes,
-            )
-
-    # tau
-    ax0 = fig.add_subplot(2, 4, 1)
-    ax0.set_title("tau")
-    ax0.text(
-        s="Joint 0",
-        x=-0.35,
-        y=0.5,
-        fontsize=12,
-        fontweight="bold",
-        rotation=90,
-        ha="center",
-        va="center",
-        transform=ax0.transAxes,
-    )
-    ax0.set_ylabel("Torque [Nm]")
-    ax1 = fig.add_subplot(2, 4, 5)
-    ax1.text(
-        s="Joint 1",
-        x=-0.35,
-        y=0.5,
-        fontsize=12,
-        fontweight="bold",
-        rotation=90,
-        ha="center",
-        va="center",
-        transform=ax1.transAxes,
-    )
-    ax1.set_ylabel("Torque [Nm]")
-    _style_joint_axes(ax0, ax1, y_t_low, y_t_max, panel="(a)")
-    ax0.legend(handles=legend, bbox_to_anchor=(0.0, 1.0), loc="upper left", ncol=1, framealpha=1.0)
-    ax0.plot(test_tau[:, 0], color="k")
-    ax1.plot(test_tau[:, 1], color="k")
-    ax0.plot(result.delan_tau[:, 0], color=color_pred, alpha=plot_alpha)
-    ax1.plot(result.delan_tau[:, 1], color=color_pred, alpha=plot_alpha)
-
-    # m
-    ax0 = fig.add_subplot(2, 4, 2)
-    ax0.set_title("H(q) * q_ddot")
-    ax0.set_ylabel("Torque [Nm]")
-    ax1 = fig.add_subplot(2, 4, 6)
-    ax1.set_ylabel("Torque [Nm]")
-    _style_joint_axes(ax0, ax1, y_m_low, y_m_max, panel="(b)")
-    ax0.plot(test_m[:, 0], color="k")
-    ax1.plot(test_m[:, 1], color="k")
-    ax0.plot(result.delan_m[:, 0], color=color_pred, alpha=plot_alpha)
-    ax1.plot(result.delan_m[:, 1], color=color_pred, alpha=plot_alpha)
-
-    # c
-    ax0 = fig.add_subplot(2, 4, 3)
-    ax0.set_title("c(q, q_dot)")
-    ax0.set_ylabel("Torque [Nm]")
-    ax1 = fig.add_subplot(2, 4, 7)
-    ax1.set_ylabel("Torque [Nm]")
-    _style_joint_axes(ax0, ax1, y_c_low, y_c_max, panel="(c)")
-    ax0.plot(test_c[:, 0], color="k")
-    ax1.plot(test_c[:, 1], color="k")
-    ax0.plot(result.delan_c[:, 0], color=color_pred, alpha=plot_alpha)
-    ax1.plot(result.delan_c[:, 1], color=color_pred, alpha=plot_alpha)
-
-    # g
-    ax0 = fig.add_subplot(2, 4, 4)
-    ax0.set_title("g(q)")
-    ax0.set_ylabel("Torque [Nm]")
-    ax1 = fig.add_subplot(2, 4, 8)
-    ax1.set_ylabel("Torque [Nm]")
-    _style_joint_axes(ax0, ax1, y_g_low, y_g_max, panel="(d)")
-    ax0.plot(test_g[:, 0], color="k")
-    ax1.plot(test_g[:, 1], color="k")
-    ax0.plot(result.delan_g[:, 0], color=color_pred, alpha=plot_alpha)
-    ax1.plot(result.delan_g[:, 1], color=color_pred, alpha=plot_alpha)
+            ax.vlines(div, ylo, yhi, linestyles="--", lw=0.5, alpha=1.0)
+            ax.plot(gt[:, j], color="k")
+            ax.plot(pred[:, j], color=color_pred, alpha=plot_alpha)
+            if j == 0:
+                ax.set_title(col_title)
+            if j == n_dof - 1:
+                ax.set_xticks(ticks)
+                ax.set_xticklabels(test_labels)
+            else:
+                ax.set_xticks([])
+            if col == 0:
+                ax.set_ylabel(f"J{j}\n[Nm]", fontsize=9)
+            if j == 0 and col == 0:
+                ax.legend(handles=legend, loc="upper left", fontsize=8, framealpha=1.0)
 
     if save_path is not None:
         save_path = Path(save_path)

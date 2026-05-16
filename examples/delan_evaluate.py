@@ -5,7 +5,8 @@
 示例:
   python examples/delan_evaluate.py \\
     --checkpoint /home/coral/project/deep_lagrangian_networks/data/delan_model.torch \\
-    --data /path/to/character_data.pickle.BAK --plot
+    --data /path/to/character_data.pickle.BAK
+# 默认保存 figures/delan_performance.png；弹窗: --show
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,8 +59,15 @@ def main() -> None:
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--data", type=Path, required=True)
     p.add_argument("--test-labels", nargs="*", default=["e", "q", "v"])
-    p.add_argument("--plot", action="store_true")
-    p.add_argument("--show", action="store_true")
+    p.add_argument(
+        "--plot",
+        dest="plot",
+        action="store_true",
+        default=True,
+        help="保存评估图（默认开启）",
+    )
+    p.add_argument("--no-plot", dest="plot", action="store_false", help="不保存图")
+    p.add_argument("--show", action="store_true", help="弹窗显示（不保存时用）")
     p.add_argument("--figure-out", type=Path, default=ROOT / "figures" / "delan_performance.png")
     p.add_argument("--seed", type=int, default=None)
     args = p.parse_args()
@@ -91,7 +100,10 @@ def main() -> None:
         test_g,
         device=device,
     )
-    print_eval_report(result)
+    has_mcg = bool(
+        np.any(test_m != 0) or np.any(test_c != 0) or np.any(test_g != 0)
+    )
+    print_eval_report(result, has_mcg_ground_truth=has_mcg)
 
     if args.plot or args.show:
         plot_delan_performance(

@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from .delan_losses import torque_loss
 from .lnet import LNet
 from .replay_memory import PyTorchReplayMemory
 
@@ -34,7 +35,7 @@ HYPER_EXAMPLE: dict[str, Any] = {
 # data/delan_model.torch（BAK 2-DoF 上效果好）
 HYPER_DELAN_MODEL: dict[str, Any] = {
     "n_width": 64,
-    "n_depth": 2,
+    "n_depth": 8,
     "diagonal_epsilon": 0.01,
     "activation": "SoftPlus",
     "b_init": 1.0e-4,
@@ -45,7 +46,7 @@ HYPER_DELAN_MODEL: dict[str, Any] = {
     "n_minibatch": 512,
     "learning_rate": 5.0e-4,
     "weight_decay": 1.0e-5,
-    "max_epoch": 10000,
+    "max_epoch": 1000,
 }
 
 
@@ -75,9 +76,13 @@ def train_delan_loop(
     *,
     cuda: bool,
     use_energy_loss: bool = True,
+    tau_loss: str = "mse",
+    smape_eps: float = 1e-3,
 ) -> int:
     """
     推荐训练循环：每 batch 使用 l_tau + l_E（当前 batch 的能量项）。
+
+    ``tau_loss='smape'``：对称 MAPE，缓解各关节力矩量级差（多轴机械臂推荐）。
 
     官方 example_DeLaN 使用 ``loss = l_tau + l_mem_mean_dEdt``（epoch 内累积的旧 batch
     能量损失），在 character_data.BAK 上易卡在较差解；本循环与改回前效果一致。
@@ -110,7 +115,7 @@ def train_delan_loop(
                 continue
             qb, qdb, qddb, taub = q[idx], qd[idx], qdd[idx], tau[idx]
             dyn = model.dynamics(qb, qdb, qddb)
-            l_tau = torch.mean((dyn.tau - taub) ** 2)
+            l_tau = torque_loss(dyn.tau, taub, tau_loss, smape_eps=smape_eps)
             if use_energy_loss:
                 d_edt = torch.sum(taub * qdb, dim=1)
                 l_e = torch.mean((dyn.dTdt + dyn.dVdt - d_edt) ** 2)
@@ -136,10 +141,11 @@ def train_delan_loop(
                 test_rmse = float(
                     torch.sqrt(torch.mean((pt.cpu() - torch.from_numpy(test_tau)) ** 2))
                 )
-            tag = "l_tau+l_E" if use_energy_loss else "l_tau"
+            tau_tag = f"l_tau({tau_loss})"
+            tag = f"{tau_tag}+l_E" if use_energy_loss else tau_tag
             msg = (
                 f"epoch {epoch:5d}  {tag}  l={loss_acc / max(steps, 1):.6f}  "
-                f"l_tau={tau_acc / max(steps, 1):.6f}"
+                f"{tau_tag}={tau_acc / max(steps, 1):.6f}"
             )
             if use_energy_loss:
                 msg += f"  l_E={e_acc / max(steps, 1):.6f}"

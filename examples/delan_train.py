@@ -72,6 +72,18 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--test-labels", nargs="*", default=["e", "q", "v"])
     p.add_argument("--no-energy-loss", action="store_true", help="仅 l_tau，不用功率守恒项")
+    p.add_argument(
+        "--tau-loss",
+        choices=("mse", "smape"),
+        default="mse",
+        help="力矩项：mse=官方 MSE；smape=对称 MAPE，多关节量级差时推荐（论文式 20）",
+    )
+    p.add_argument(
+        "--smape-eps",
+        type=float,
+        default=1e-3,
+        help="SMAPE 分母稳定项 |τ|+|τ̂|+eps（Nm 量级数据常用 1e-3~1e-2）",
+    )
     p.add_argument("-c", nargs="?", const=1, default=1, type=int, help="使用 CUDA")
     p.add_argument("-i", nargs="?", const=0, default=0, type=int, help="CUDA 设备 id")
     p.add_argument("-s", nargs="?", const=42, default=42, type=int, help="随机种子")
@@ -126,7 +138,10 @@ def main() -> None:
         hyper = dict(HYPER_DELAN_MODEL if args.preset == "delan_model" else HYPER_EXAMPLE)
     if args.max_epoch is not None:
         hyper["max_epoch"] = args.max_epoch
-    print(f"preset={args.preset}  loop={args.loop}  hyper(width,depth,lr)=({hyper['n_width']},{hyper['n_depth']},{hyper['learning_rate']})")
+    print(
+        f"preset={args.preset}  loop={args.loop}  tau_loss={args.tau_loss}  "
+        f"hyper(width,depth,lr)=({hyper['n_width']},{hyper['n_depth']},{hyper['learning_rate']})"
+    )
 
     load_path = args.load
     if load_model and load_path is None:
@@ -172,6 +187,8 @@ def main() -> None:
             hyper,
             cuda=cuda,
             use_energy_loss=not args.no_energy_loss,
+            tau_loss=args.tau_loss,
+            smape_eps=args.smape_eps,
         )
 
     if save_model:
@@ -188,6 +205,8 @@ def main() -> None:
                 "test_labels": test_labels,
                 "data_path": str(args.data.resolve()),
                 "train_loop": args.loop,
+                "tau_loss": args.tau_loss,
+                "smape_eps": args.smape_eps,
             },
         )
         print(f"\n模型已保存: {save_to}")
@@ -205,9 +224,7 @@ def main() -> None:
     )
     print_eval_report(eval_result, has_mcg_ground_truth=has_mcg)
 
-    if (args.plot or render) and n_dof != 2:
-        print("警告: 评估图目前仅适配 2-DoF 布局，已跳过 plot（力矩 MSE 已在上方打印）。")
-    elif args.plot or render:
+    if args.plot or render:
         plot_delan_performance(
             eval_result,
             test_labels,
