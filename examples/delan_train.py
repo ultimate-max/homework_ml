@@ -18,14 +18,16 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mysteric_net.delan_data import init_env, load_dataset
+from mysteric_net.delan_data import init_env, inspect_dataset, load_dataset
 from mysteric_net.delan_eval import evaluate_delan_on_test, plot_delan_performance, print_eval_report
+from mysteric_net.delan_hyper import suggest_hyper
 from mysteric_net.delan_train_core import (
     HYPER_DELAN_MODEL,
     HYPER_EXAMPLE,
@@ -46,9 +48,21 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--preset",
-        choices=("example", "delan_model"),
+        choices=("example", "delan_model", "auto"),
         default="delan_model",
-        help="delan_model=64x2,lr5e-4（BAK 推荐）；example=128x8,lr5e-3",
+        help="delan_model / example；auto=按 n_dof 与样本量缩放（任意机械臂推荐）",
+    )
+    p.add_argument(
+        "--inspect",
+        action="store_true",
+        help="仅打印数据集信息（n_dof、轨迹数等）后退出",
+    )
+    p.add_argument(
+        "--test-frac",
+        type=float,
+        default=None,
+        metavar="F",
+        help="无 test-label 匹配时，用最后 F 比例轨迹作测试（如 0.2）",
     )
     p.add_argument(
         "--loop",
@@ -78,6 +92,10 @@ def main() -> None:
     if not args.data.is_file():
         raise SystemExit(f"数据文件不存在: {args.data}")
 
+    if args.inspect:
+        print(inspect_dataset(args.data))
+        return
+
     env_args = SimpleNamespace(
         s=[args.s], i=[args.i], c=[args.c], r=[args.r], l=[args.l], m=[args.m],
     )
@@ -86,6 +104,7 @@ def main() -> None:
     train_data, test_data, divider, dt_mean = load_dataset(
         filename=str(args.data),
         test_label=tuple(args.test_labels),
+        test_frac=args.test_frac,
     )
     train_labels, train_qp, train_qv, train_qa, _p, _pd, train_tau = train_data
     test_labels, test_qp, test_qv, test_qa, _tp, _tpd, test_tau, test_m, test_c, test_g = test_data
@@ -95,8 +114,16 @@ def main() -> None:
     print(f"train ({len(train_labels)}): {train_labels}")
     print(f"test  ({len(test_labels)}): {test_labels}")
     print(f"#train={train_qp.shape[0]}  #test={test_qp.shape[0]}")
+    if n_dof > 6:
+        print(
+            f"提示: n_dof={n_dof} 时 H 与 dH/dq 计算量约为 O(n^4)，"
+            "可适当减小 --preset auto 给出的 batch 或 n_width。"
+        )
 
-    hyper = dict(HYPER_DELAN_MODEL if args.preset == "delan_model" else HYPER_EXAMPLE)
+    if args.preset == "auto":
+        hyper = suggest_hyper(n_dof, train_qp.shape[0], base="delan_model")
+    else:
+        hyper = dict(HYPER_DELAN_MODEL if args.preset == "delan_model" else HYPER_EXAMPLE)
     if args.max_epoch is not None:
         hyper["max_epoch"] = args.max_epoch
     print(f"preset={args.preset}  loop={args.loop}  hyper(width,depth,lr)=({hyper['n_width']},{hyper['n_depth']},{hyper['learning_rate']})")
@@ -115,6 +142,11 @@ def main() -> None:
         if load_path is None or not load_path.is_file():
             raise SystemExit(f"未找到 checkpoint: {load_path}")
         state = torch.load(load_path, map_location=device, weights_only=False)
+        ckpt_dof = state.get("n_dof", state.get("dof"))
+        if ckpt_dof is not None and int(ckpt_dof) != n_dof:
+            raise SystemExit(
+                f"checkpoint n_dof={ckpt_dof} 与数据 n_dof={n_dof} 不一致，请重新训练或换数据。"
+            )
         if "hyper" in state:
             hyper = state["hyper"]
             model = build_lnet(n_dof, hyper)
@@ -168,9 +200,14 @@ def main() -> None:
     eval_result = evaluate_delan_on_test(
         model, test_qp, test_qv, test_qa, test_tau, test_m, test_c, test_g, device=device,
     )
-    print_eval_report(eval_result)
+    has_mcg = bool(
+        np.any(test_m != 0) or np.any(test_c != 0) or np.any(test_g != 0)
+    )
+    print_eval_report(eval_result, has_mcg_ground_truth=has_mcg)
 
-    if args.plot or render:
+    if (args.plot or render) and n_dof != 2:
+        print("警告: 评估图目前仅适配 2-DoF 布局，已跳过 plot（力矩 MSE 已在上方打印）。")
+    elif args.plot or render:
         plot_delan_performance(
             eval_result,
             test_labels,

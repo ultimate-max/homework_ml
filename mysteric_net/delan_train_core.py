@@ -16,8 +16,8 @@ from .replay_memory import PyTorchReplayMemory
 
 # example_DeLaN.py 默认超参
 HYPER_EXAMPLE: dict[str, Any] = {
-    "n_width": 128,
-    "n_depth": 8,
+    "n_width": 64,
+    "n_depth": 16,
     "diagonal_epsilon": 0.01,
     "activation": "SoftPlus",
     "b_init": 1.0e-3,
@@ -26,9 +26,9 @@ HYPER_EXAMPLE: dict[str, Any] = {
     "gain_hidden": float(np.sqrt(2.0)),
     "gain_output": 0.1,
     "n_minibatch": 512,
-    "learning_rate": 5.0e-3,
+    "learning_rate": 5.0e-4,
     "weight_decay": 1.0e-5,
-    "max_epoch": 10000,
+    "max_epoch": 2000,
 }
 
 # data/delan_model.torch（BAK 2-DoF 上效果好）
@@ -253,6 +253,7 @@ def save_delan_checkpoint(
         "hyper": hyper,
         "state_dict": model.state_dict(),
         "dof": model.n_dof,
+        "n_dof": model.n_dof,
         "hidden_dim": model.layers[0].weight.shape[0] if model.layers else hyper["n_width"],
         "num_hidden_layers": len(model.layers),
         "activation": hyper.get("activation", "SoftPlus"),

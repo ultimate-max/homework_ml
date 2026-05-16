@@ -7,11 +7,77 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any, Sequence, Tuple
 
 import dill as pickle
 import numpy as np
 import torch
+
+from .delan_import import OPTIONAL_DECOMP_KEYS, TRAIN_KEYS, inspect_pickle_dict
+
+def validate_pickle_raw(data: dict[str, Any]) -> tuple[int, bool]:
+    """
+    校验 pickle 结构；缺失 m/c/g 时补零。
+
+    返回 (n_dof, has_nonzero_mcg)。
+    """
+    if "labels" not in data or "qp" not in data:
+        raise KeyError("pickle 须含 labels、qp 等字段（见 mysteric_net.delan_import）")
+
+    n_traj = len(data["labels"])
+    if n_traj == 0:
+        raise ValueError("labels 为空")
+
+    n_dof = int(np.asarray(data["qp"][0]).shape[1])
+    for i in range(n_traj):
+        d_i = int(np.asarray(data["qp"][i]).shape[1])
+        if d_i != n_dof:
+            raise ValueError(f"轨迹 {i} 的 n_dof={d_i} 与首条 {n_dof} 不一致")
+
+    for i in range(n_traj):
+        Ti = int(np.asarray(data["qp"][i]).shape[0])
+        for key in TRAIN_KEYS:
+            if key not in data:
+                raise KeyError(f"缺少训练字段 {key!r}")
+            arr = np.asarray(data[key][i])
+            if arr.shape[0] != Ti:
+                raise ValueError(f"轨迹 {i} 字段 {key} 长度 {arr.shape[0]} != T={Ti}")
+            if int(arr.shape[-1]) != n_dof and arr.ndim > 1:
+                raise ValueError(f"轨迹 {i} 字段 {key} 末维 {arr.shape} != n_dof={n_dof}")
+
+    has_mcg = True
+    for key in OPTIONAL_DECOMP_KEYS:
+        if key not in data:
+            print(
+                f"load_dataset: 缺少 {key}，已用零填充（力矩训练可用，分解 MSE 无参考意义）",
+                file=sys.stderr,
+            )
+            data[key] = [
+                np.zeros((int(np.asarray(data["qp"][i]).shape[0]), n_dof), dtype=np.float64)
+                for i in range(n_traj)
+            ]
+            has_mcg = False
+        else:
+            for i in range(n_traj):
+                if not np.any(np.asarray(data[key][i]) != 0):
+                    has_mcg = False
+
+    for key in ("p", "pdot"):
+        if key not in data:
+            data[key] = [
+                np.zeros((int(np.asarray(data["qp"][i]).shape[0]), n_dof), dtype=np.float64)
+                for i in range(n_traj)
+            ]
+
+    return n_dof, has_mcg
+
+
+def inspect_dataset(filename: str | Path) -> str:
+    with open(filename, "rb") as f:
+        data = pickle.load(f)
+    validate_pickle_raw(data)
+    return inspect_pickle_dict(data)
 
 
 def init_env(args) -> tuple[int, bool, bool, bool, bool]:
@@ -57,6 +123,7 @@ def load_dataset(
     n_characters: int = 3,
     filename: str = "data/character_data.pickle",
     test_label: Sequence[str] = ("e", "q", "v"),
+    test_frac: float | None = None,
 ) -> Tuple[
     tuple[list[str], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     tuple[list[str], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
@@ -76,11 +143,12 @@ def load_dataset(
     with open(filename, "rb") as f:
         data: dict[str, Any] = pickle.load(f)
 
-    n_dof = int(np.asarray(data["qp"][0]).shape[1])
-    for i in range(len(data["labels"])):
-        d_i = int(np.asarray(data["qp"][i]).shape[1])
-        if d_i != n_dof:
-            raise ValueError(f"数据集中各轨迹 n_dof 不一致: 轨迹0为{n_dof}，轨迹{i}为{d_i}")
+    n_dof, has_mcg = validate_pickle_raw(data)
+    if not has_mcg:
+        print(
+            "load_dataset: m/c/g 全为零或未提供，评估时 Inertial/Coriolis/Gravity MSE 仅供参考。",
+            file=sys.stderr,
+        )
 
     labels_all = data["labels"]
     test_idx: list[int] = []
@@ -92,10 +160,20 @@ def load_dataset(
                 test_idx.append(ix)
         else:
             missing.append(x)
-    if missing:
+    if missing and test_frac is None:
         print(
             "load_dataset 警告: 以下标签不在数据中，已从测试划分中忽略: "
             f"{missing}",
+            file=sys.stderr,
+        )
+
+    if not test_idx and test_frac is not None:
+        n_all = len(labels_all)
+        n_test = max(1, int(round(n_all * float(test_frac))))
+        test_idx = list(range(n_all - n_test, n_all))
+        print(
+            f"load_dataset: 按 test_frac={test_frac} 将最后 {n_test} 条轨迹作测试: "
+            f"{[labels_all[i] for i in test_idx]}",
             file=sys.stderr,
         )
 
@@ -186,6 +264,7 @@ def load_dataset(
         test_g,
     )
     return train_data, test_data, divider, dt_mean
+
 
 # 向后兼容旧名
 load_character_dataset = load_dataset

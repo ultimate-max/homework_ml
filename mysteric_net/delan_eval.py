@@ -110,14 +110,17 @@ def evaluate_delan_on_test(
     )
 
 
-def print_eval_report(result: DeLaNEvalResult) -> None:
+def print_eval_report(result: DeLaNEvalResult, *, has_mcg_ground_truth: bool = True) -> None:
     print("\n################################################")
     print("Evaluating DeLaN (test set):")
     print("\nPerformance:")
     print(f"                Torque MSE = {result.err_tau:.3e}")
-    print(f"              Inertial MSE = {result.err_m:.3e}")
-    print(f"Coriolis & Centrifugal MSE = {result.err_c:.3e}")
-    print(f"         Gravitational MSE = {result.err_g:.3e}")
+    if has_mcg_ground_truth:
+        print(f"              Inertial MSE = {result.err_m:.3e}")
+        print(f"Coriolis & Centrifugal MSE = {result.err_c:.3e}")
+        print(f"         Gravitational MSE = {result.err_g:.3e}")
+    else:
+        print("  (无 m/c/g 真值，已跳过 Inertial / Coriolis / Gravity MSE)")
     print(f"    Power Conservation MSE = {result.err_dEdt:.3e}")
     hz = 1.0 / result.t_eval_per_sample if result.t_eval_per_sample > 0 else float("inf")
     print(f"      Comp Time per Sample = {result.t_eval_per_sample:.3e}s / {hz:.1f}Hz")
