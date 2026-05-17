@@ -1,4 +1,4 @@
-# DeLaN_Stribeck / Mysteric-Net
+# DeLaN_Stribeck / RobotDynamics
 # 须在已激活的 conda 环境中安装: pip install -r requirements.txt
 #
 # PyTorch 须从官方 CUDA 轮子源安装（勿用 conda 的 cpuonly，否则无 GPU）。

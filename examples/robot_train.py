@@ -28,17 +28,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mysteric_net.delan_data import load_dataset
-from mysteric_net.delan_hyper import suggest_hyper
-from mysteric_net.delan_losses import torque_loss
-from mysteric_net.friction_losses import friction_pinn_loss
-from mysteric_net.losses import mysteric_losses
-from mysteric_net.model import MystericNet
-from mysteric_net.sequence_data import (
+from RobotDynamics.DeLaN import load_dataset, suggest_hyper, torque_loss
+from RobotDynamics.FrictionModule import (
     build_mysteric_tensors,
+    friction_pinn_loss,
     load_pickle_trajectories,
+    mysteric_losses,
+    pickle_has_mcg_decomposition,
     stack_trajectories_to_flat,
 )
+from RobotDynamics.MystericNet import MystericNet
 
 
 def _parse_args() -> argparse.Namespace:
@@ -53,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seq-len", type=int, default=30)
     p.add_argument("--epochs", type=int, default=500)
     p.add_argument("--batch", type=int, default=256)
-    p.add_argument("--lr", type=float, default=5e-4)
+    p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--lnet-width", type=int, default=None, help="默认用 suggest_hyper")
     p.add_argument("--lnet-depth", type=int, default=None)
     p.add_argument(
@@ -73,6 +72,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("-m", nargs="?", const=0, default=0, type=int, help="保存 checkpoint")
     p.add_argument("--save", type=Path, default=ROOT / "checkpoints" / "mysteric_robot.pt")
     p.add_argument("-c", nargs="?", const=1, default=1, type=int)
+    p.add_argument(
+        "--friction-label",
+        choices=("auto", "none", "decomposition"),
+        default="auto",
+        help="auto=有 m/c/g 分解才监督 τ_fri；none=仅总力矩+（可选）PINN 物理项",
+    )
     return p.parse_args()
 
 
@@ -94,6 +99,16 @@ def main() -> None:
     n_dof = test_qp.shape[1]
 
     raw = load_pickle_trajectories(str(args.data))
+    if args.friction_label == "auto":
+        supervise_fri = pickle_has_mcg_decomposition(raw)
+    else:
+        supervise_fri = args.friction_label == "decomposition"
+    if not supervise_fri:
+        print(
+            "摩擦监督: 无 τ_fri 真值 → 仅用总力矩 τ_hat 监督；"
+            "PINN 时另加 SCV 物理项（不监督摩擦标签）。"
+        )
+
     train_label_set = set(train_labels)
     qp, qv, qa, tau, _tau_rigid, tau_fri = stack_trajectories_to_flat(
         raw, train_labels=train_label_set
@@ -139,12 +154,17 @@ def main() -> None:
 
             tau_hat, _core, tau_fri, _H, g_hat, tau_phys = model(qb, qdb, qddb, qs, qds)
 
+            lf = torch.zeros((), device=device, dtype=qb.dtype)
             if args.friction_backend == "stribeck_pinn":
                 assert tau_phys is not None
                 lf, _, _ = friction_pinn_loss(
-                    tau_fri, tfb, tau_phys, lambda_physics=args.lambda_physics
+                    tau_fri,
+                    tfb,
+                    tau_phys,
+                    lambda_physics=args.lambda_physics,
+                    supervise_friction=supervise_fri,
                 )
-            else:
+            elif supervise_fri:
                 lf = torch.mean((tau_fri - tfb) ** 2)
 
             ltau = torque_loss(tau_hat, taub, args.tau_loss, smape_eps=args.smape_eps)
@@ -182,6 +202,8 @@ def main() -> None:
                 "state_dict": model.state_dict(),
                 "dof": n_dof,
                 "seq_len": args.seq_len,
+                "lnet_hidden": l_w,
+                "lnet_layers": l_d,
                 "friction_backend": args.friction_backend,
                 "lambda_physics": args.lambda_physics,
                 "data_path": str(args.data.resolve()),

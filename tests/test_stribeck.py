@@ -2,7 +2,7 @@
 
 import torch
 
-from mysteric_net.stribeck import HNetStribeck, HNetStribeckPINN, scv_torque
+from RobotDynamics.FrictionModule import HNetStribeck, HNetStribeckPINN, scv_torque
 
 
 def test_scv_zero_velocity_smooth() -> None:

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mysteric_net.model import MystericNet
+from RobotDynamics.MystericNet import MystericNet
 
 
 def extract_hnet_params(model: MystericNet, device: torch.device) -> dict:
@@ -143,7 +143,7 @@ def load_model(model_path: Path, device: torch.device) -> tuple[MystericNet, dic
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--model", type=Path, default=ROOT / "checkpoints" / "mysteric_net.pt",
+    p.add_argument("--model", type=Path, default=ROOT / "checkpoints" / "RobotDynamics.pt",
                    help="训练好的模型路径")
     p.add_argument("--output-dir", type=Path, default=ROOT / "results",
                    help="参数输出目录")

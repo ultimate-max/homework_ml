@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mysteric_net.model import MystericNet
-from mysteric_net.synthetic_plant import build_windows
+from RobotDynamics.MystericNet import MystericNet
+from RobotDynamics.FrictionModule import build_windows
 
 
 def load_dataset_npz(path: Path, device: torch.device) -> tuple[torch.Tensor, ...]:
@@ -58,7 +58,7 @@ def load_model(model_path: Path, device: torch.device) -> MystericNet:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--model", type=Path, default=ROOT / "checkpoints" / "mysteric_net.pt", 
+    p.add_argument("--model", type=Path, default=ROOT / "checkpoints" / "RobotDynamics.pt", 
                    help="训练好的模型路径")
     p.add_argument("--test-data", type=Path, default=ROOT / "data" / "test_synthetic_2dof_inverse.npz",
                    help="测试数据集路径")

@@ -9,10 +9,15 @@ import numpy as np
 import pytest
 import torch
 
-from mysteric_net.delan_data import load_dataset, validate_pickle_raw
-from mysteric_net.delan_hyper import suggest_hyper
-from mysteric_net.delan_import import build_pickle_dict, import_npz, save_pickle
-from mysteric_net.delan_train_core import build_lnet
+from RobotDynamics.DeLaN import (
+    build_lnet,
+    build_pickle_dict,
+    import_npz,
+    load_dataset,
+    save_pickle,
+    suggest_hyper,
+    validate_pickle_raw,
+)
 
 
 def _synthetic_traj(T: int, n_dof: int, seed: int) -> dict:

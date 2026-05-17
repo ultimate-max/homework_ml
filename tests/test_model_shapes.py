@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from mysteric_net.model import MystericNet
+from RobotDynamics.MystericNet import MystericNet
 
 
 @pytest.mark.parametrize("backend", ["tcn", "stribeck", "stribeck_pinn"])

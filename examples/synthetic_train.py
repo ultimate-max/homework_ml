@@ -22,10 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mysteric_net.friction_losses import friction_pinn_loss
-from mysteric_net.losses import mysteric_losses
-from mysteric_net.model import MystericNet
-from mysteric_net.synthetic_plant import simulate_2dof_inverse_dynamics
+from RobotDynamics.FrictionModule import friction_pinn_loss, mysteric_losses, simulate_2dof_inverse_dynamics
+from RobotDynamics.MystericNet import MystericNet
 
 
 def load_dataset_npz(path: Path, device: torch.device) -> tuple[torch.Tensor, ...]:
@@ -49,7 +47,7 @@ def main() -> None:
     p.add_argument("--batch", type=int, default=256)
     p.add_argument("--data", type=Path, default=None, help="generate_dataset.py 输出的 .npz")
     p.add_argument("--save-dir", type=Path, default=ROOT / "checkpoints", help="模型保存目录")
-    p.add_argument("--save-name", type=str, default="mysteric_net", help="模型保存名称")
+    p.add_argument("--save-name", type=str, default="RobotDynamics", help="模型保存名称")
     p.add_argument(
         "--friction-backend",
         choices=("tcn", "stribeck", "stribeck_pinn"),

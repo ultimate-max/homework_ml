@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mysteric_net.synthetic_plant import simulate_2dof_inverse_dynamics
+from RobotDynamics.FrictionModule import simulate_2dof_inverse_dynamics
 
 
 def main() -> None:

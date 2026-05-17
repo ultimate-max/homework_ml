@@ -20,8 +20,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(DLN))
 
 from deep_lagrangian_networks.DeLaN_model import DeepLagrangianNetwork  # noqa: E402
-from mysteric_net.delan_data import load_dataset  # noqa: E402
-from mysteric_net.lnet import LNet  # noqa: E402
+from RobotDynamics.DeLaN import load_dataset  # noqa: E402
+from RobotDynamics.DeLaN import LNet  # noqa: E402
 
 DATA = DLN / "data" / "character_data.pickle.BAK"
 CKPT = DLN / "data" / "delan_model.torch"

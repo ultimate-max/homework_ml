@@ -25,9 +25,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mysteric_net.delan_data import inspect_dataset
-from mysteric_net.delan_hyper import suggest_hyper
-from mysteric_net.delan_import import import_mat, import_npz, inspect_pickle_dict, save_pickle
+from RobotDynamics.DeLaN import (
+    import_mat,
+    import_npz,
+    inspect_dataset,
+    inspect_pickle_dict,
+    save_pickle,
+    suggest_hyper,
+)
 
 
 def main() -> int:

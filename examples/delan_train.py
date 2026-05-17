@@ -2,7 +2,7 @@
 """
 DeLaN L-Net 训练。
 
-- 数据：官方 ``load_dataset``（mysteric_net.delan_data）
+- 数据：官方 ``load_dataset``（RobotDynamics.delan_data）
 - 训练：默认 **标准循环**（每 batch: l_tau + l_E）；可选 ``--loop official`` 复现 example_DeLaN
 
 示例:
@@ -25,14 +25,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mysteric_net.delan_data import init_env, inspect_dataset, load_dataset
-from mysteric_net.delan_eval import evaluate_delan_on_test, plot_delan_performance, print_eval_report
-from mysteric_net.delan_hyper import suggest_hyper
-from mysteric_net.delan_train_core import (
+from RobotDynamics.DeLaN import (
     HYPER_DELAN_MODEL,
     HYPER_EXAMPLE,
     build_lnet,
+    evaluate_delan_on_test,
+    init_env,
+    inspect_dataset,
+    load_dataset,
+    plot_delan_performance,
+    print_eval_report,
     save_delan_checkpoint,
+    suggest_hyper,
     train_delan_loop,
     train_delan_official_loop,
 )

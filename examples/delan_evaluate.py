@@ -22,9 +22,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mysteric_net.delan_data import load_dataset
-from mysteric_net.delan_eval import evaluate_delan_on_test, plot_delan_performance, print_eval_report
-from mysteric_net.delan_train_core import build_lnet
+from RobotDynamics.DeLaN import (
+    build_lnet,
+    evaluate_delan_on_test,
+    load_dataset,
+    plot_delan_performance,
+    print_eval_report,
+)
 
 
 def load_lnet_from_checkpoint(path: Path, device: torch.device):
