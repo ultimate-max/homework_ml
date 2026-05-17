@@ -44,6 +44,7 @@ class MystericNet(nn.Module):
         stribeck_hidden: Tuple[int, ...] = (128, 64),
         stribeck_dropout: float = 0.0,
         scv_variant: Literal["scv", "cv"] = "scv",
+        fo_mlp_hidden_layers: int = 3,
     ) -> None:
         super().__init__()
         self.dof = dof
@@ -66,6 +67,7 @@ class MystericNet(nn.Module):
                 seq_len=seq_len,
                 hidden_channels=hnet_channels,
                 kernel_size=hnet_kernel,
+                mlp_hidden_layers=fo_mlp_hidden_layers,
             )
         elif friction_backend == "fo_cascade_pinn":
             self.hnet = HNetFOCascadePINN(
@@ -73,6 +75,7 @@ class MystericNet(nn.Module):
                 seq_len=seq_len,
                 hidden_channels=hnet_channels,
                 kernel_size=hnet_kernel,
+                mlp_hidden_layers=fo_mlp_hidden_layers,
             )
         elif friction_backend == "stribeck":
             self.hnet = HNetStribeck(dof, model=scv_variant)

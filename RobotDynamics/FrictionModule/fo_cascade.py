@@ -109,6 +109,33 @@ class _CausalIntegrator1s(nn.Module):
         return torch.stack(steps, dim=1)
 
 
+def _build_stribeck_mlp(
+    dof: int,
+    hidden_dim: int,
+    *,
+    num_hidden_layers: int = 3,
+) -> nn.Sequential:
+    """
+    逐时刻 Stribeck MLP：``num_hidden_layers`` 个隐层（每层 Linear + Tanh），再输出 dof。
+
+    默认 3 隐层 → 4 个 Linear，比单隐层更能表达 Stribeck 型非线性。
+    """
+    n = max(1, int(num_hidden_layers))
+    layers: list[nn.Module] = []
+    in_d = dof
+    for _ in range(n):
+        layers.append(nn.Linear(in_d, hidden_dim))
+        layers.append(nn.Tanh())
+        in_d = hidden_dim
+    layers.append(nn.Linear(in_d, dof))
+    net = nn.Sequential(*layers)
+    for m in net.modules():
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_normal_(m.weight)
+            nn.init.zeros_(m.bias)
+    return net
+
+
 def _stack_q_qd(q_seq: torch.Tensor, qd_seq: torch.Tensor) -> torch.Tensor:
     """(B, L, dof)×2 → (B, 2*dof, L)，供 Conv1d 使用。"""
     if q_seq.shape != qd_seq.shape:
@@ -132,11 +159,13 @@ class HNetFOCascade(nn.Module):
         *,
         tcn_layers: int = 2,
         mlp_hidden: int | None = None,
+        mlp_hidden_layers: int = 3,
     ) -> None:
         super().__init__()
         self.dof = dof
         self.seq_len = seq_len
         mlp_h = mlp_hidden if mlp_hidden is not None else max(4 * dof, 16)
+        self.mlp_hidden_layers = max(1, int(mlp_hidden_layers))
 
         # TCN₁：在 [q, q̇] 历史上得到 v_seq
         self.tcn_diff = _CausalTCNStack(
@@ -144,10 +173,8 @@ class HNetFOCascade(nn.Module):
         )
         self.proj_v = nn.Conv1d(hidden_channels, dof, kernel_size=1)
 
-        self.stribeck_mlp = nn.Sequential(
-            nn.Linear(dof, mlp_h),
-            nn.Tanh(),
-            nn.Linear(mlp_h, dof),
+        self.stribeck_mlp = _build_stribeck_mlp(
+            dof, mlp_h, num_hidden_layers=self.mlp_hidden_layers
         )
         self.integrate_1s = _CausalIntegrator1s(dof)
 
@@ -158,10 +185,6 @@ class HNetFOCascade(nn.Module):
 
         nn.init.xavier_normal_(self.head.weight)
         nn.init.zeros_(self.head.bias)
-        for m in self.stribeck_mlp.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                nn.init.zeros_(m.bias)
 
     def forward(
         self,
@@ -232,6 +255,7 @@ class HNetFOCascadePINN(nn.Module):
         *,
         tcn_layers: int = 2,
         mlp_hidden: int | None = None,
+        mlp_hidden_layers: int = 3,
     ) -> None:
         super().__init__()
         self.dof = dof
@@ -243,6 +267,7 @@ class HNetFOCascadePINN(nn.Module):
             kernel_size=kernel_size,
             tcn_layers=tcn_layers,
             mlp_hidden=mlp_hidden,
+            mlp_hidden_layers=mlp_hidden_layers,
         )
         self.scv = StribeckSCVParams(dof)
 

@@ -97,6 +97,12 @@ def _parse_args() -> argparse.Namespace:
         choices=("tcn", "fo_cascade", "fo_cascade_pinn", "stribeck", "stribeck_pinn"),
         default="stribeck_pinn",
     )
+    p.add_argument(
+        "--fo-mlp-hidden-layers",
+        type=int,
+        default=3,
+        help="fo_cascade Stribeck MLP 隐层数（每层 Linear+Tanh），默认 3",
+    )
     p.add_argument("--seq-len", type=int, default=30)
     p.add_argument("--epochs", type=int, default=500)
     p.add_argument("--batch", type=int, default=256)
@@ -186,6 +192,7 @@ def main() -> None:
         lnet_hidden=l_w,
         lnet_layers=l_d,
         friction_backend=args.friction_backend,
+        fo_mlp_hidden_layers=args.fo_mlp_hidden_layers,
     ).to(device)
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5, amsgrad=True)
