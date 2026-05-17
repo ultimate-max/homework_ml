@@ -4,7 +4,10 @@ import pytest
 from RobotDynamics.MystericNet import MystericNet
 
 
-@pytest.mark.parametrize("backend", ["tcn", "fo_cascade", "stribeck", "stribeck_pinn"])
+@pytest.mark.parametrize(
+    "backend",
+    ["tcn", "fo_cascade", "fo_cascade_pinn", "stribeck", "stribeck_pinn"],
+)
 def test_mysteric_forward_shapes(backend: str) -> None:
     dof, L, B = 2, 30, 4
     m = MystericNet(dof=dof, seq_len=L, friction_backend=backend)
@@ -19,7 +22,7 @@ def test_mysteric_forward_shapes(backend: str) -> None:
     assert tau_fri.shape == (B, dof)
     assert H_hat.shape == (B, dof, dof)
     assert g_hat.shape == (B, dof)
-    if backend == "stribeck_pinn":
+    if backend in ("stribeck_pinn", "fo_cascade_pinn"):
         assert tau_phys is not None and tau_phys.shape == (B, dof)
     else:
-        assert tau_phys is None or tau_phys.shape == (B, dof)
+        assert tau_phys is None

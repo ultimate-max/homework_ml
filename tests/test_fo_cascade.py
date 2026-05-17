@@ -1,6 +1,6 @@
 import torch
 
-from RobotDynamics.FrictionModule import HNetFOCascade
+from RobotDynamics.FrictionModule import HNetFOCascade, HNetFOCascadePINN
 
 
 def test_fo_cascade_shapes_and_causality() -> None:
@@ -15,3 +15,13 @@ def test_fo_cascade_shapes_and_causality() -> None:
     assert v_last.shape == (B, dof)
     assert s_last.shape == (B, dof)
     assert v_seq.shape == (B, L, dof)
+
+
+def test_fo_cascade_pinn_returns_physics() -> None:
+    dof, L, B = 2, 30, 3
+    net = HNetFOCascadePINN(dof=dof, seq_len=L)
+    q_seq = torch.randn(B, L, dof)
+    qd_seq = torch.randn(B, L, dof)
+    tau_pred, tau_phys = net(q_seq, qd_seq)
+    assert tau_pred.shape == (B, dof)
+    assert tau_phys.shape == (B, dof)

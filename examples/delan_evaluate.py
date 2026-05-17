@@ -2,10 +2,12 @@
 """
 加载已训练 DeLaN（官方格式 checkpoint），测试集评估与绘图。
 
-示例:
+示例（仅 DeLaN / delan_lnet.pt）:
   python examples/delan_evaluate.py \\
-    --checkpoint /home/coral/project/deep_lagrangian_networks/data/delan_model.torch \\
-    --data /path/to/character_data.pickle.BAK
+    --checkpoint checkpoints/delan_lnet.pt \\
+    --data data/robot.pickle
+
+Mysteric 权重（mysteric_robot.pt）请用 robot_evaluate.py → figures/robot_friction.png
 # 默认保存 figures/delan_performance.png；弹窗: --show
 """
 
@@ -31,29 +33,73 @@ from RobotDynamics.DeLaN import (
 )
 
 
+def _lnet_depth(state: dict) -> int:
+    layer_ids = [
+        int(k.split(".")[1])
+        for k in state
+        if k.startswith("layers.") and k.endswith(".weight")
+    ]
+    return max(layer_ids) + 1 if layer_ids else 2
+
+
+def _strip_state_prefix(state: dict, prefix: str) -> dict:
+    n = len(prefix)
+    return {k[n:]: v for k, v in state.items() if k.startswith(prefix)}
+
+
 def load_lnet_from_checkpoint(path: Path, device: torch.device):
     ckpt = torch.load(path, map_location=device, weights_only=False)
     state = ckpt.get("state_dict")
     if state is None:
         raise ValueError(f"checkpoint 中无 state_dict: {path}")
-    hyper = ckpt.get("hyper")
-    if hyper is not None:
-        model = build_lnet(int(ckpt.get("dof", state["layers.0.weight"].shape[1])), hyper)
-    else:
-        w0 = state["layers.0.weight"]
-        layer_ids = [int(k.split(".")[1]) for k in state if k.startswith("layers.") and k.endswith(".weight")]
-        model = build_lnet(
-            int(ckpt.get("dof", w0.shape[1])),
-            {
-                "n_width": int(ckpt.get("hidden_dim", w0.shape[0])),
-                "n_depth": int(ckpt.get("num_hidden_layers", max(layer_ids) + 1 if layer_ids else 2)),
-                "b_diag_init": float(ckpt.get("b_diagonal", 0.001)),
-                "diagonal_epsilon": 0.01,
-                "b_init": float(ckpt.get("b_init", 1e-4)),
-                "activation": str(ckpt.get("activation", "SoftPlus")),
-            },
+
+    is_mysteric = any(k.startswith("lnet.") for k in state) or ckpt.get("friction_backend") is not None
+    if is_mysteric:
+        lnet_state = _strip_state_prefix(state, "lnet.")
+        if "layers.0.weight" not in lnet_state:
+            raise ValueError(
+                f"checkpoint 似为 Mysteric-Net 但缺少 lnet.* 权重: {path}\n"
+                "完整模型评估请用: python examples/robot_evaluate.py --checkpoint ... --data ..."
+            )
+        w0 = lnet_state["layers.0.weight"]
+        dof = int(ckpt.get("dof", w0.shape[1]))
+        hyper = {
+            "n_width": int(ckpt.get("lnet_hidden", w0.shape[0])),
+            "n_depth": int(ckpt.get("lnet_layers", _lnet_depth(lnet_state))),
+            "b_diag_init": float(ckpt.get("mass_diag_eps", ckpt.get("b_diagonal", 1.0e-2))),
+            "diagonal_epsilon": float(ckpt.get("lnet_numerical_H_ridge", 1.0e-2)),
+            "b_init": float(ckpt.get("b_init", 0.1)),
+            "activation": str(ckpt.get("activation", "ReLu")),
+        }
+        model = build_lnet(dof, hyper)
+        model.load_state_dict(lnet_state)
+        print(
+            f"已从 Mysteric checkpoint 加载 L-Net（摩擦后端={ckpt.get('friction_backend', '?')}）。\n"
+            "  本脚本输出 figures/delan_performance.png（仅刚体 τ,m,c,g）。\n"
+            "  若要 figures/robot_friction.png（τ + τ_fri 曲线），请运行:\n"
+            "    python examples/robot_evaluate.py "
+            f"--checkpoint {path} --data <robot.pickle>"
         )
-    model.load_state_dict(state)
+    else:
+        hyper = ckpt.get("hyper")
+        if hyper is not None:
+            model = build_lnet(int(ckpt.get("dof", state["layers.0.weight"].shape[1])), hyper)
+        else:
+            w0 = state["layers.0.weight"]
+            model = build_lnet(
+                int(ckpt.get("dof", w0.shape[1])),
+                {
+                    "n_width": int(ckpt.get("hidden_dim", w0.shape[0])),
+                    "n_depth": int(ckpt.get("num_hidden_layers", _lnet_depth(state))),
+                    "b_diag_init": float(ckpt.get("b_diagonal", 0.001)),
+                    "diagonal_epsilon": 0.01,
+                    "b_init": float(ckpt.get("b_init", 1e-4)),
+                    "activation": str(ckpt.get("activation", "SoftPlus")),
+                },
+            )
+        model.load_state_dict(state)
+
+    model = model.to(device)
     model.eval()
     return model, ckpt
 

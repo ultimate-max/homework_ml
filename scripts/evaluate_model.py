@@ -49,8 +49,18 @@ def load_model(model_path: Path, device: torch.device) -> MystericNet:
     seq_len = checkpoint.get('seq_len', 30)
     
     backend = checkpoint.get("friction_backend", "tcn")
-    model = MystericNet(dof=dof, seq_len=seq_len, friction_backend=backend).to(device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    l_w = checkpoint.get("lnet_hidden")
+    l_d = checkpoint.get("lnet_layers")
+    kw: dict = dict(dof=dof, seq_len=seq_len, friction_backend=backend)
+    if l_w is not None:
+        kw["lnet_hidden"] = int(l_w)
+    if l_d is not None:
+        kw["lnet_layers"] = int(l_d)
+    model = MystericNet(**kw).to(device)
+    state = checkpoint.get("state_dict") or checkpoint.get("model_state_dict")
+    if state is None:
+        raise KeyError(f"checkpoint 缺少 state_dict / model_state_dict: {model_path}")
+    model.load_state_dict(state)
     model.eval()
     
     return model, checkpoint

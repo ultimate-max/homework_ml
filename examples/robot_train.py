@@ -6,7 +6,8 @@
   --friction-backend stribeck       纯可学习 SCV 物理模型
   --friction-backend stribeck_pinn  MLP + SCV 物理损失（论文 Eq. (6)）
   --friction-backend tcn            原 TCN（Yeo 等）
-  --friction-backend fo_cascade     TCN₁→MLP→TCN₂（Xun 图 4）
+  --friction-backend fo_cascade       TCN₁→MLP→TCN₂（Xun 图 4）
+  --friction-backend fo_cascade_pinn  fo_cascade + SCV PINN（Eq. 6）
 
 示例:
   python examples/robot_train.py \\
@@ -92,7 +93,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--test-labels", nargs="*", default=["e", "v", "q"])
     p.add_argument(
         "--friction-backend",
-        choices=("tcn", "fo_cascade", "stribeck", "stribeck_pinn"),
+        choices=("tcn", "fo_cascade", "fo_cascade_pinn", "stribeck", "stribeck_pinn"),
         default="stribeck_pinn",
     )
     p.add_argument("--seq-len", type=int, default=30)
@@ -105,7 +106,7 @@ def _parse_args() -> argparse.Namespace:
         "--lambda-physics",
         type=float,
         default=0.5,
-        help="PINN 摩擦物理项权重 λ（Eq. 6），仅 stribeck_pinn",
+        help="PINN 摩擦物理项权重 λ（Eq. 6），用于 stribeck_pinn / fo_cascade_pinn",
     )
     p.add_argument("--energy-loss", action="store_true", help="总力矩 + 刚体能量守恒")
     p.add_argument(
@@ -217,7 +218,7 @@ def main() -> None:
                 )
 
                 lf = torch.zeros((), device=device, dtype=qb.dtype)
-                if args.friction_backend == "stribeck_pinn":
+                if args.friction_backend in ("stribeck_pinn", "fo_cascade_pinn"):
                     assert tau_phys is not None
                     lf, _, _ = friction_pinn_loss(
                         tau_fri,

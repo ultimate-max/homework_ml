@@ -216,6 +216,7 @@ python examples/robot_train.py \
 |----------------------|------|
 | `tcn` | 时序卷积（原 Mysteric-Net 论文） |
 | `fo_cascade` | TCN₁→MLP→TCN₂，对齐 Xun 分数阶摩擦图 4 |
+| `fo_cascade_pinn` | fo_cascade + SCV，`friction_pinn_loss`（Hu 等 PINN，\(\lambda\)=`--lambda-physics`） |
 | `stribeck` | 可学习 Stribeck-Coulomb-Viscous 物理模型 |
 | `stribeck_pinn` | MLP + SCV 物理损失（Hu 等 PINN） |
 
@@ -228,7 +229,7 @@ python examples/robot_train.py \
 | 项 | 何时启用 | 含义 |
 |----|----------|------|
 | \(l_\tau\) | 始终 | 总力矩监督：`--tau-loss smape`（推荐）或 `mse`，对 \(\hat\tau=\tau_{\text{core}}+\hat\tau_{\text{fri}}\) 与测量 \(\tau\) |
-| \(l_{\text{fri}}\) | 数据含 `m,c,g` 分解，或 `stribeck_pinn` | 有分解时 MSE\((\hat\tau_{\text{fri}},\tau-\tau_{\text{rigid}})\)；PINN 时为 \((1-\lambda)\) 数据项 \(+\lambda\) SCV 物理项（`--lambda-physics`） |
+| \(l_{\text{fri}}\) | 数据含 `m,c,g` 分解，或 `stribeck_pinn` / `fo_cascade_pinn` | 有分解时 MSE\((\hat\tau_{\text{fri}},\tau-\tau_{\text{rigid}})\)；PINN 时为 \((1-\lambda)\) 数据项 \(+\lambda\) SCV 物理项（`--lambda-physics`） |
 | \(l_E\) | **仅**加 `--energy-loss` | Yeo 等 Eq. (7) 刚体能量率一致性，实现于 `RobotDynamics/FrictionModule/energy_loss.py` |
 
 能量项（可选）：
@@ -242,7 +243,8 @@ l_E = \mathbb{E}\left[\left(\frac{\mathrm{d}T}{\mathrm{d}t}+\frac{\mathrm{d}V}{\
 ```bash
 python examples/robot_train.py \
   --data data/robot.pickle \
-  --friction-backend fo_cascade \
+  --friction-backend fo_cascade_pinn \
+  --lambda-physics 0.5 \
   --tau-loss smape \
   --energy-loss \
   -m 1
@@ -293,15 +295,37 @@ python examples/delan_evaluate.py \
 
 终端会打印 **Torque / Inertial / Coriolis / Gravity / Power** 等 MSE；`n_dof > 2` 时评估图为每个关节一行、四列（τ, m, c, g）。
 
-### 4.2 MystericNet 评估
+### 4.2 Mysteric-Net 评估（`robot_train.py` 训练的权重）
+
+**不要用** `delan_evaluate.py`（那只画 DeLaN 刚体四列图，默认 `figures/delan_performance.png`）。
+
+机械臂 pickle + `mysteric_robot.pt` 请用：
+
+```bash
+python examples/robot_evaluate.py \
+  --checkpoint checkpoints/mysteric_robot.pt \
+  --data data/robot.pickle \
+  --test-labels e v q
+```
+
+- **默认输出图**：`figures/robot_friction.png`（各关节 \(\tau\)、\(\tau_{\text{fri}}\) 等对比曲线）
+- 自定义路径：`--figure-out figures/my_robot_friction.png`
+- 弹窗：`--show`
+
+| checkpoint 来源 | 评估脚本 | 默认图片 |
+|-----------------|----------|----------|
+| `delan_train.py` → `delan_lnet.pt` | `examples/delan_evaluate.py` | `figures/delan_performance.png` |
+| `robot_train.py` → `mysteric_robot.pt` | `examples/robot_evaluate.py` | **`figures/robot_friction.png`** |
+
+合成 2-DoF `.npz` 测试（无绘图或仅数值）可用：
 
 ```bash
 python scripts/evaluate_model.py \
-  --model checkpoints/mysteric_net.pt \
+  --model checkpoints/RobotDynamics.pt \
   --test-data data/test_synthetic_2dof_inverse.npz
 ```
 
-（合成 2-DoF 测试集需先用 `scripts/generate_test_dataset.py` 生成。）
+（需先用 `scripts/generate_test_dataset.py` 生成测试 npz。）
 
 ### 4.3 实现验证（可选）
 

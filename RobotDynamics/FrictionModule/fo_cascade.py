@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .stribeck import StribeckSCVParams
+
 
 class _CausalConv1d(nn.Module):
     """左侧填充的因果 Conv1d：输出时刻 t 仅依赖输入 ≤ t。"""
@@ -158,3 +160,52 @@ class HNetFOCascade(nn.Module):
         s_ch = s_seq.transpose(1, 2)
         tau_fri = self.head(self.tcn_int(s_ch)[:, :, -1])
         return tau_fri, v_seq[:, -1, :], s_seq[:, -1, :], v_seq
+
+
+class HNetFOCascadePINN(nn.Module):
+    """
+    fo_cascade + SCV 物理支路（Hu 等 PINN Eq. (6)）。
+
+    - ``fo``：TCN₁→MLP→TCN₂，输出 τ_pred（含记忆/滞回）
+    - ``scv``：SCV(q̇_t)，输出 τ_physics（瞬时 Stribeck 形状）
+
+    训练时用 ``friction_pinn_loss(τ_pred, τ_target, τ_physics, λ=...)``。
+    """
+
+    def __init__(
+        self,
+        dof: int,
+        seq_len: int = 30,
+        hidden_channels: int = 8,
+        kernel_size: int = 3,
+        *,
+        tcn_layers: int = 2,
+        mlp_hidden: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.dof = dof
+        self.seq_len = seq_len
+        self.fo = HNetFOCascade(
+            dof,
+            seq_len=seq_len,
+            hidden_channels=hidden_channels,
+            kernel_size=kernel_size,
+            tcn_layers=tcn_layers,
+            mlp_hidden=mlp_hidden,
+        )
+        self.scv = StribeckSCVParams(dof)
+
+    def forward(
+        self,
+        q_seq: torch.Tensor,
+        qd_seq: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if qd_seq is None:
+            raise ValueError("fo_cascade_pinn 需要 qd_seq 以计算 SCV(q̇)")
+        if qd_seq.shape[1] != self.seq_len or qd_seq.shape[2] != self.dof:
+            raise ValueError(
+                f"Expected qd_seq (B, {self.seq_len}, {self.dof}), got {qd_seq.shape}"
+            )
+        tau_pred = self.fo(q_seq, qd_seq)
+        tau_physics = self.scv(qd_seq[:, -1, :])
+        return tau_pred, tau_physics

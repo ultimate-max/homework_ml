@@ -50,7 +50,7 @@ def main() -> None:
     p.add_argument("--save-name", type=str, default="RobotDynamics", help="模型保存名称")
     p.add_argument(
         "--friction-backend",
-        choices=("tcn", "fo_cascade", "stribeck", "stribeck_pinn"),
+        choices=("tcn", "fo_cascade", "fo_cascade_pinn", "stribeck", "stribeck_pinn"),
         default="tcn",
     )
     p.add_argument("--lambda-physics", type=float, default=0.5)
@@ -95,7 +95,7 @@ def main() -> None:
             tau_hat, _core, tau_fri_hat, _H_hat, g_hat, tau_phys = model(
                 qb, qdb, qddb, q_seq_b, qd_seq_b
             )
-            if args.friction_backend == "stribeck_pinn" and tau_phys is not None:
+            if args.friction_backend in ("stribeck_pinn", "fo_cascade_pinn") and tau_phys is not None:
                 tau_fri_true = taub - _core.detach()
                 lf, _, _ = friction_pinn_loss(
                     tau_fri_hat,

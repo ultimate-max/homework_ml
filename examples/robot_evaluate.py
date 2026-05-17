@@ -174,7 +174,7 @@ def predict(
 def print_scv_params(model: MystericNet) -> None:
     hnet = model.hnet
     if not hasattr(hnet, "scv"):
-        print("当前摩擦后端无 SCV 参数表（tcn）。")
+        print("当前摩擦后端无 SCV 参数表（tcn / fo_cascade）。")
         return
     scv = hnet.scv
     names = ("k_v", "k_c", "k_a", "k_s", "v_s", "alpha")

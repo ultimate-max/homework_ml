@@ -14,11 +14,12 @@ from .sequence_data import (
 )
 from .stribeck import HNetStribeck, HNetStribeckPINN, StribeckSCVParams, cv_torque, scv_torque
 from .synthetic_plant import build_windows, simulate_2dof_inverse_dynamics
-from .fo_cascade import HNetFOCascade
+from .fo_cascade import HNetFOCascade, HNetFOCascadePINN
 from .tcn import HNetTCN
 
 __all__ = [
     "HNetFOCascade",
+    "HNetFOCascadePINN",
     "HNetTCN",
     "HNetStribeck",
     "HNetStribeckPINN",
