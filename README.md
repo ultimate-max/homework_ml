@@ -215,7 +215,7 @@ python examples/robot_train.py \
 | `--friction-backend` | 说明 |
 |----------------------|------|
 | `tcn` | 时序卷积（原 Mysteric-Net 论文） |
-| `fo_cascade` | TCN₁→MLP→TCN₂，对齐 Xun 分数阶摩擦图 4 |
+| `fo_cascade` | TCN₁([q,q̇])→MLP→**1/s**→TCN₂，对齐 Xun 分数阶摩擦图 4（MLP 后因果积分低通） |
 | `fo_cascade_pinn` | fo_cascade + SCV，`friction_pinn_loss`（Hu 等 PINN，\(\lambda\)=`--lambda-physics`） |
 | `stribeck` | 可学习 Stribeck-Coulomb-Viscous 物理模型 |
 | `stribeck_pinn` | MLP + SCV 物理损失（Hu 等 PINN） |
@@ -223,7 +223,8 @@ python examples/robot_train.py \
 **损失（Mysteric-Net，默认不含能量项）**：
 
 \[
-\mathcal{L} = l_\tau + l_{\text{fri}} \;+\; [\;l_E\;]
+\mathcal{L} = l_\tau + w_{\text{fri}}\, l_{\text{fri}} \;+\; [\;l_E\;]
+\quad\text{（默认 } w_{\text{fri}}=0.01\text{，见 \texttt{--friction-loss-weight}）}
 \]
 
 | 项 | 何时启用 | 含义 |

@@ -5,7 +5,7 @@ Mysteric-Net: DeLaN 刚体 (L-Net) + 摩擦子网络 (H-Net)。
 
 摩擦后端 ``friction_backend``:
   - ``tcn``: 原论文 TCN（Yeo 等）
-  - ``fo_cascade``: TCN₁→MLP→TCN₂（Xun 图 4 分数阶摩擦的神经化）
+  - ``fo_cascade``: TCN₁→MLP→1/s→TCN₂（Xun 图 4；MLP 后因果积分低通）
   - ``fo_cascade_pinn``: fo_cascade + SCV 物理约束（Hu 等 PINN, Eq. (6)）
   - ``stribeck``: 可学习 SCV 物理模型（Hu 等 Eq. (4)）
   - ``stribeck_pinn``: MLP + SCV 物理约束（Hu 等 PINN, Eq. (6)）

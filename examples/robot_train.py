@@ -6,7 +6,7 @@
   --friction-backend stribeck       纯可学习 SCV 物理模型
   --friction-backend stribeck_pinn  MLP + SCV 物理损失（论文 Eq. (6)）
   --friction-backend tcn            原 TCN（Yeo 等）
-  --friction-backend fo_cascade       TCN₁→MLP→TCN₂（Xun 图 4）
+  --friction-backend fo_cascade       TCN₁→MLP→1/s→TCN₂（Xun 图 4）
   --friction-backend fo_cascade_pinn  fo_cascade + SCV PINN（Eq. 6）
 
 示例:
@@ -61,6 +61,7 @@ def _checkpoint_payload(
         "lnet_layers": l_d,
         "friction_backend": args.friction_backend,
         "lambda_physics": args.lambda_physics,
+        "friction_loss_weight": args.friction_loss_weight,
         "energy_loss": args.energy_loss,
         "tau_loss": args.tau_loss,
         "data_path": str(args.data.resolve()),
@@ -107,6 +108,14 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="PINN 摩擦物理项权重 λ（Eq. 6），用于 stribeck_pinn / fo_cascade_pinn",
+    )
+    p.add_argument(
+        "--friction-loss-weight",
+        type=float,
+        default=0.01,
+        help="总损失中摩擦项系数: loss = l_tau + w_fri * l_fri。"
+        "SMAPE 力矩项 ~O(1)，MSE 摩擦项常为 O(10~100)，默认 0.01；"
+        "可设 0 关闭摩擦项（仅 l_tau）。",
     )
     p.add_argument("--energy-loss", action="store_true", help="总力矩 + 刚体能量守恒")
     p.add_argument(
@@ -183,8 +192,10 @@ def main() -> None:
     N = qi.shape[0]
     B = args.batch
 
+    w_fri = float(args.friction_loss_weight)
     print(
         f"device={device}  n_dof={n_dof}  friction={args.friction_backend}  "
+        f"λ_phys={args.lambda_physics}  w_fri={w_fri}  "
         f"train N={N}  test N={test_qp.shape[0]}"
     )
 
@@ -204,7 +215,7 @@ def main() -> None:
             last_epoch = epoch
             t_epoch_start = time.perf_counter()
             perm = torch.randperm(N, device=device)
-            loss_acc = steps = 0
+            loss_acc = ltau_acc = lf_acc = steps = 0
             for s in range(0, N, B):
                 idx = perm[s : s + B]
                 if idx.numel() < 4:
@@ -231,7 +242,7 @@ def main() -> None:
                     lf = torch.mean((tau_fri - tfb) ** 2)
 
                 ltau = torque_loss(tau_hat, taub, args.tau_loss, smape_eps=args.smape_eps)
-                loss = ltau + lf
+                loss = ltau + w_fri * lf
 
                 if args.energy_loss:
                     _, _, lE = mysteric_losses(
@@ -243,6 +254,8 @@ def main() -> None:
                 loss.backward()
                 opt.step()
                 loss_acc += float(loss.detach())
+                ltau_acc += float(ltau.detach())
+                lf_acc += float(lf.detach())
                 steps += 1
 
             epoch_sec = time.perf_counter() - t_epoch_start
@@ -261,11 +274,20 @@ def main() -> None:
                     rmse = float(torch.sqrt(torch.mean((th - tt) ** 2)).cpu())
                 win = epoch_times[-50:]
                 avg_50 = sum(win) / len(win)
+                n_s = max(steps, 1)
+                lt_m = ltau_acc / n_s
+                lf_m = lf_acc / n_s
                 print(
-                    f"epoch {epoch:4d}  loss={loss_acc/max(steps,1):.5f}  "
+                    f"epoch {epoch:4d}  loss={loss_acc/n_s:.5f}  "
+                    f"l_tau={lt_m:.4f}  l_fri={lf_m:.4f}  w_fri*l_fri={w_fri*lf_m:.4f}  "
                     f"RMSE_test≈{rmse:.4f}  "
                     f"time/epoch={epoch_sec:.2f}s  avg50={avg_50:.2f}s/epoch"
                 )
+                if epoch == 1 and w_fri > 0 and lf_m > 10 * max(lt_m, 1e-6):
+                    print(
+                        "  提示: 未加权 l_fri 远大于 l_tau（量纲不同：SMAPE vs MSE）。"
+                        "可减小 --friction-loss-weight 或 --friction-label none。"
+                    )
 
     except KeyboardInterrupt:
         print(f"\n训练被中断 (Ctrl+C)，保存 epoch={last_epoch} 的权重 …", flush=True)
