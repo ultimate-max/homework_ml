@@ -5,7 +5,8 @@
 摩擦后端（Hu 等 SCV / PINN）:
   --friction-backend stribeck       纯可学习 SCV 物理模型
   --friction-backend stribeck_pinn  MLP + SCV 物理损失（论文 Eq. (6)）
-  --friction-backend tcn            原 TCN（默认 Yeo 等）
+  --friction-backend tcn            原 TCN（Yeo 等）
+  --friction-backend fo_cascade     TCN₁→MLP→TCN₂（Xun 图 4）
 
 示例:
   python examples/robot_train.py \\
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -40,13 +42,57 @@ from RobotDynamics.FrictionModule import (
 from RobotDynamics.MystericNet import MystericNet
 
 
+def _checkpoint_payload(
+    model: MystericNet,
+    *,
+    n_dof: int,
+    args: argparse.Namespace,
+    l_w: int,
+    l_d: int,
+    epoch: int,
+) -> dict:
+    return {
+        "state_dict": model.state_dict(),
+        "epoch": epoch,
+        "dof": n_dof,
+        "seq_len": args.seq_len,
+        "lnet_hidden": l_w,
+        "lnet_layers": l_d,
+        "friction_backend": args.friction_backend,
+        "lambda_physics": args.lambda_physics,
+        "energy_loss": args.energy_loss,
+        "tau_loss": args.tau_loss,
+        "data_path": str(args.data.resolve()),
+    }
+
+
+def _save_checkpoint(
+    path: Path,
+    model: MystericNet,
+    *,
+    n_dof: int,
+    args: argparse.Namespace,
+    l_w: int,
+    l_d: int,
+    epoch: int,
+    interrupted: bool = False,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _checkpoint_payload(
+        model, n_dof=n_dof, args=args, l_w=l_w, l_d=l_d, epoch=epoch
+    )
+    payload["interrupted"] = interrupted
+    torch.save(payload, path)
+    print(f"已保存: {path.resolve()}")
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Mysteric-Net（L-Net + 摩擦）训练")
     p.add_argument("--data", type=Path, default=ROOT / "data" / "robot.pickle")
     p.add_argument("--test-labels", nargs="*", default=["e", "v", "q"])
     p.add_argument(
         "--friction-backend",
-        choices=("tcn", "stribeck", "stribeck_pinn"),
+        choices=("tcn", "fo_cascade", "stribeck", "stribeck_pinn"),
         default="stribeck_pinn",
     )
     p.add_argument("--seq-len", type=int, default=30)
@@ -141,76 +187,110 @@ def main() -> None:
         f"train N={N}  test N={test_qp.shape[0]}"
     )
 
-    for epoch in range(1, args.epochs + 1):
-        perm = torch.randperm(N, device=device)
-        loss_acc = steps = 0
-        for s in range(0, N, B):
-            idx = perm[s : s + B]
-            if idx.numel() < 4:
-                continue
-            qb, qdb, qddb = qi[idx], qdi[idx], qddi[idx]
-            taub, tfb = taui[idx], tau_fri_t[idx]
-            qs, qds = q_seq[idx], qd_seq[idx]
+    epoch_times: list[float] = []
+    last_epoch = 0
 
-            tau_hat, _core, tau_fri, _H, g_hat, tau_phys = model(qb, qdb, qddb, qs, qds)
+    def _interrupt_save_path() -> Path:
+        if args.m:
+            return args.save
+        stem = args.save.stem
+        if not stem.endswith("_interrupt"):
+            stem = f"{stem}_interrupt"
+        return args.save.with_name(stem + args.save.suffix)
 
-            lf = torch.zeros((), device=device, dtype=qb.dtype)
-            if args.friction_backend == "stribeck_pinn":
-                assert tau_phys is not None
-                lf, _, _ = friction_pinn_loss(
-                    tau_fri,
-                    tfb,
-                    tau_phys,
-                    lambda_physics=args.lambda_physics,
-                    supervise_friction=supervise_fri,
+    try:
+        for epoch in range(1, args.epochs + 1):
+            last_epoch = epoch
+            t_epoch_start = time.perf_counter()
+            perm = torch.randperm(N, device=device)
+            loss_acc = steps = 0
+            for s in range(0, N, B):
+                idx = perm[s : s + B]
+                if idx.numel() < 4:
+                    continue
+                qb, qdb, qddb = qi[idx], qdi[idx], qddi[idx]
+                taub, tfb = taui[idx], tau_fri_t[idx]
+                qs, qds = q_seq[idx], qd_seq[idx]
+
+                tau_hat, _core, tau_fri, _H, g_hat, tau_phys = model(
+                    qb, qdb, qddb, qs, qds
                 )
-            elif supervise_fri:
-                lf = torch.mean((tau_fri - tfb) ** 2)
 
-            ltau = torque_loss(tau_hat, taub, args.tau_loss, smape_eps=args.smape_eps)
-            loss = ltau + lf
+                lf = torch.zeros((), device=device, dtype=qb.dtype)
+                if args.friction_backend == "stribeck_pinn":
+                    assert tau_phys is not None
+                    lf, _, _ = friction_pinn_loss(
+                        tau_fri,
+                        tfb,
+                        tau_phys,
+                        lambda_physics=args.lambda_physics,
+                        supervise_friction=supervise_fri,
+                    )
+                elif supervise_fri:
+                    lf = torch.mean((tau_fri - tfb) ** 2)
 
-            if args.energy_loss:
-                _, _, lE = mysteric_losses(
-                    model.lnet, tau_hat, taub, tau_fri, qb, qdb, qddb, g_hat
+                ltau = torque_loss(tau_hat, taub, args.tau_loss, smape_eps=args.smape_eps)
+                loss = ltau + lf
+
+                if args.energy_loss:
+                    _, _, lE = mysteric_losses(
+                        model.lnet, tau_hat, taub, tau_fri, qb, qdb, qddb, g_hat
+                    )
+                    loss = loss + lE
+
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                opt.step()
+                loss_acc += float(loss.detach())
+                steps += 1
+
+            epoch_sec = time.perf_counter() - t_epoch_start
+            epoch_times.append(epoch_sec)
+
+            if epoch == 1 or epoch % 50 == 0 or epoch == args.epochs:
+                with torch.no_grad():
+                    n_test = min(512, test_qp.shape[0])
+                    qt = torch.from_numpy(test_qp[:n_test]).float().to(device)
+                    qdt = torch.from_numpy(test_qv[:n_test]).float().to(device)
+                    qddt = torch.from_numpy(test_qa[:n_test]).float().to(device)
+                    tt = torch.from_numpy(test_tau[:n_test]).float().to(device)
+                    qs_t = qt.unsqueeze(1).expand(-1, args.seq_len, -1)
+                    qds_t = qdt.unsqueeze(1).expand(-1, args.seq_len, -1)
+                    th, _, _, _, _, _ = model(qt, qdt, qddt, qs_t, qds_t)
+                    rmse = float(torch.sqrt(torch.mean((th - tt) ** 2)).cpu())
+                win = epoch_times[-50:]
+                avg_50 = sum(win) / len(win)
+                print(
+                    f"epoch {epoch:4d}  loss={loss_acc/max(steps,1):.5f}  "
+                    f"RMSE_test≈{rmse:.4f}  "
+                    f"time/epoch={epoch_sec:.2f}s  avg50={avg_50:.2f}s/epoch"
                 )
-                loss = loss + lE
 
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-            loss_acc += float(loss.detach())
-            steps += 1
-
-        if epoch == 1 or epoch % 50 == 0 or epoch == args.epochs:
-            with torch.no_grad():
-                n_test = min(512, test_qp.shape[0])
-                qt = torch.from_numpy(test_qp[:n_test]).float().to(device)
-                qdt = torch.from_numpy(test_qv[:n_test]).float().to(device)
-                qddt = torch.from_numpy(test_qa[:n_test]).float().to(device)
-                tt = torch.from_numpy(test_tau[:n_test]).float().to(device)
-                qs_t = qt.unsqueeze(1).expand(-1, args.seq_len, -1)
-                qds_t = qdt.unsqueeze(1).expand(-1, args.seq_len, -1)
-                th, _, _, _, _, _ = model(qt, qdt, qddt, qs_t, qds_t)
-                rmse = float(torch.sqrt(torch.mean((th - tt) ** 2)).cpu())
-            print(f"epoch {epoch:4d}  loss={loss_acc/max(steps,1):.5f}  RMSE_test≈{rmse:.4f}")
+    except KeyboardInterrupt:
+        print(f"\n训练被中断 (Ctrl+C)，保存 epoch={last_epoch} 的权重 …", flush=True)
+        _save_checkpoint(
+            _interrupt_save_path(),
+            model,
+            n_dof=n_dof,
+            args=args,
+            l_w=l_w,
+            l_d=l_d,
+            epoch=last_epoch,
+            interrupted=True,
+        )
+        raise SystemExit(130) from None
 
     if args.m:
-        args.save.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "state_dict": model.state_dict(),
-                "dof": n_dof,
-                "seq_len": args.seq_len,
-                "lnet_hidden": l_w,
-                "lnet_layers": l_d,
-                "friction_backend": args.friction_backend,
-                "lambda_physics": args.lambda_physics,
-                "data_path": str(args.data.resolve()),
-            },
+        _save_checkpoint(
             args.save,
+            model,
+            n_dof=n_dof,
+            args=args,
+            l_w=l_w,
+            l_d=l_d,
+            epoch=last_epoch,
+            interrupted=False,
         )
-        print(f"已保存: {args.save}")
 
 
 if __name__ == "__main__":

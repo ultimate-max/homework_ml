@@ -50,7 +50,7 @@ def main() -> None:
     p.add_argument("--save-name", type=str, default="RobotDynamics", help="模型保存名称")
     p.add_argument(
         "--friction-backend",
-        choices=("tcn", "stribeck", "stribeck_pinn"),
+        choices=("tcn", "fo_cascade", "stribeck", "stribeck_pinn"),
         default="tcn",
     )
     p.add_argument("--lambda-physics", type=float, default=0.5)

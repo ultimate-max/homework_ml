@@ -4,7 +4,7 @@ import pytest
 from RobotDynamics.MystericNet import MystericNet
 
 
-@pytest.mark.parametrize("backend", ["tcn", "stribeck", "stribeck_pinn"])
+@pytest.mark.parametrize("backend", ["tcn", "fo_cascade", "stribeck", "stribeck_pinn"])
 def test_mysteric_forward_shapes(backend: str) -> None:
     dof, L, B = 2, 30, 4
     m = MystericNet(dof=dof, seq_len=L, friction_backend=backend)

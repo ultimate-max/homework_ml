@@ -5,6 +5,7 @@ Mysteric-Net: DeLaN 刚体 (L-Net) + 摩擦子网络 (H-Net)。
 
 摩擦后端 ``friction_backend``:
   - ``tcn``: 原论文 TCN（Yeo 等）
+  - ``fo_cascade``: TCN₁→MLP→TCN₂（Xun 图 4 分数阶摩擦的神经化）
   - ``stribeck``: 可学习 SCV 物理模型（Hu 等 Eq. (4)）
   - ``stribeck_pinn``: MLP + SCV 物理约束（Hu 等 PINN, Eq. (6)）
 """
@@ -17,10 +18,11 @@ import torch
 import torch.nn as nn
 
 from ..DeLaN.lnet import LNet
+from ..FrictionModule.fo_cascade import HNetFOCascade
 from ..FrictionModule.stribeck import HNetStribeck, HNetStribeckPINN
 from ..FrictionModule.tcn import HNetTCN
 
-FrictionBackend = Literal["tcn", "stribeck", "stribeck_pinn"]
+FrictionBackend = Literal["tcn", "fo_cascade", "stribeck", "stribeck_pinn"]
 
 
 class MystericNet(nn.Module):
@@ -55,6 +57,13 @@ class MystericNet(nn.Module):
             self.hnet = HNetTCN(
                 dof, seq_len=seq_len, hidden_channels=hnet_channels, kernel_size=hnet_kernel
             )
+        elif friction_backend == "fo_cascade":
+            self.hnet = HNetFOCascade(
+                dof,
+                seq_len=seq_len,
+                hidden_channels=hnet_channels,
+                kernel_size=hnet_kernel,
+            )
         elif friction_backend == "stribeck":
             self.hnet = HNetStribeck(dof, model=scv_variant)
         elif friction_backend == "stribeck_pinn":
@@ -83,7 +92,7 @@ class MystericNet(nn.Module):
         tau_core, H_hat, g_hat = self.lnet(q, qd, qdd)
         tau_fri_physics: torch.Tensor | None = None
 
-        if self.friction_backend == "tcn":
+        if self.friction_backend in ("tcn", "fo_cascade"):
             tau_fri = self.hnet(q_seq, qd_seq)
         elif self.friction_backend == "stribeck":
             tau_fri, _ = self.hnet(q_seq, qd_seq)

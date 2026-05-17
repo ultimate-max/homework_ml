@@ -8,7 +8,7 @@
 DeLaN_Stribeck/
 ├── RobotDynamics/          # 主代码包
 │   ├── DeLaN/              # L-Net、数据加载、训练与评估
-│   ├── FrictionModule/     # TCN、Stribeck、合成数据
+│   ├── FrictionModule/     # TCN、FO 级联、Stribeck、合成数据
 │   └── MystericNet/        # DeLaN + 摩擦联合模型
 ├── examples/
 │   ├── delan_train.py      # 仅训练 DeLaN（刚体）
@@ -188,6 +188,10 @@ python examples/delan_train.py \
 | `-c 1` | 使用 CUDA（默认） |
 | `-l 1` | 仅加载权重，不训练 |
 | `--load path` | 指定 checkpoint |
+| `--no-energy-loss` | 默认带能量项；加此开关则**仅**用力矩损失 \(l_\tau\) |
+
+**损失（仅 DeLaN）**：默认 \(\mathcal{L} = l_\tau + l_E\)。\(l_\tau\) 为 `mse` 或 `smape`；\(l_E\) 为刚体功率守恒  
+\(\mathbb{E}[(\mathrm{d}T/\mathrm{d}t + \mathrm{d}V/\mathrm{d}t - \tau^\top \dot q)^2]\)（由 `LNet.dynamics` 的 `dTdt`、`dVdt` 计算）。实现见 `RobotDynamics/DeLaN/train_core.py`。
 
 权重默认路径：`checkpoints/delan_lnet.pt`。
 
@@ -211,10 +215,42 @@ python examples/robot_train.py \
 | `--friction-backend` | 说明 |
 |----------------------|------|
 | `tcn` | 时序卷积（原 Mysteric-Net 论文） |
+| `fo_cascade` | TCN₁→MLP→TCN₂，对齐 Xun 分数阶摩擦图 4 |
 | `stribeck` | 可学习 Stribeck-Coulomb-Viscous 物理模型 |
 | `stribeck_pinn` | MLP + SCV 物理损失（Hu 等 PINN） |
 
-默认保存：`checkpoints/mysteric_robot.pt`。
+**损失（Mysteric-Net，默认不含能量项）**：
+
+\[
+\mathcal{L} = l_\tau + l_{\text{fri}} \;+\; [\;l_E\;]
+\]
+
+| 项 | 何时启用 | 含义 |
+|----|----------|------|
+| \(l_\tau\) | 始终 | 总力矩监督：`--tau-loss smape`（推荐）或 `mse`，对 \(\hat\tau=\tau_{\text{core}}+\hat\tau_{\text{fri}}\) 与测量 \(\tau\) |
+| \(l_{\text{fri}}\) | 数据含 `m,c,g` 分解，或 `stribeck_pinn` | 有分解时 MSE\((\hat\tau_{\text{fri}},\tau-\tau_{\text{rigid}})\)；PINN 时为 \((1-\lambda)\) 数据项 \(+\lambda\) SCV 物理项（`--lambda-physics`） |
+| \(l_E\) | **仅**加 `--energy-loss` | Yeo 等 Eq. (7) 刚体能量率一致性，实现于 `RobotDynamics/FrictionModule/energy_loss.py` |
+
+能量项（可选）：
+
+\[
+l_E = \mathbb{E}\left[\left(\frac{\mathrm{d}T}{\mathrm{d}t}+\frac{\mathrm{d}V}{\mathrm{d}t} - (\tau-\hat\tau_{\text{fri}})^\top \dot q\right)^2\right]
+\]
+
+其中 \(\mathrm{d}T/\mathrm{d}t+\mathrm{d}V/\mathrm{d}t\) 由 **L-Net** 的 `dynamics()` 给出；\((\tau-\hat\tau_{\text{fri}})^\top\dot q\) 把摩擦从总力矩中剥离后的功率残差。开启 `--energy-loss` 时训练更慢（需 L-Net 能量率前向），合成数据上同样可用：
+
+```bash
+python examples/robot_train.py \
+  --data data/robot.pickle \
+  --friction-backend fo_cascade \
+  --tau-loss smape \
+  --energy-loss \
+  -m 1
+
+python examples/synthetic_train.py --data data/synthetic_2dof_inverse.npz --energy-loss -m 1
+```
+
+默认保存：`checkpoints/mysteric_robot.pt`（需 `-m 1`）。**Ctrl+C 中断训练**时会自动保存当前权重：若已加 `-m 1` 则写入 `--save` 路径，否则写入 `checkpoints/mysteric_robot_interrupt.pt`（checkpoint 中含 `epoch`、`interrupted` 字段）。
 
 ### 3.3 2-DoF 合成数据（快速冒烟）
 
