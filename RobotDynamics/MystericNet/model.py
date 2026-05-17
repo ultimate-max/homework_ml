@@ -44,7 +44,7 @@ class MystericNet(nn.Module):
         stribeck_hidden: Tuple[int, ...] = (128, 64),
         stribeck_dropout: float = 0.0,
         scv_variant: Literal["scv", "cv"] = "scv",
-        fo_mlp_hidden_layers: int = 3,
+        fo_mlp_hidden_layers: int = 6,
     ) -> None:
         super().__init__()
         self.dof = dof

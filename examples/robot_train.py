@@ -100,8 +100,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--fo-mlp-hidden-layers",
         type=int,
-        default=3,
-        help="fo_cascade Stribeck MLP 隐层数（每层 Linear+Tanh），默认 3",
+        default=6,
+        help="fo_cascade Stribeck ResMLP 残差块个数，默认 6",
     )
     p.add_argument("--seq-len", type=int, default=30)
     p.add_argument("--epochs", type=int, default=500)
