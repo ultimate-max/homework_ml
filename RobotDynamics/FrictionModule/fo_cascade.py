@@ -4,7 +4,7 @@ H-Net（Xun 等分数阶摩擦图 4 的神经化实现）：TCN₁ → MLP → 1
   [q, q̇]^{t-L:t}  --TCN₁-->  v_seq（等效分数阶微分）
                  --ResMLP--> s_raw（Stribeck 非线性，残差块堆叠）
                  --1/s-->  s_seq（因果积分低通，抑制 MLP 高频）
-                 --TCN₂-->  τ_fri（滞回记忆）
+                 --TCN₂-->  τ_fri（线性因果积分 / 滞回记忆，无激活）
 
 TCN₁ 输入为位置与速度拼接（与 Yeo H-Net TCN 一致）。
 """
@@ -224,7 +224,7 @@ class HNetFOCascade(nn.Module):
             hidden_channels,
             n_layers=tcn_layers,
             kernel_size=kernel_size,
-            use_activation=True,
+            use_activation=False,
         )
         self.head = nn.Linear(hidden_channels, dof)
 
