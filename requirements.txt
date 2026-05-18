@@ -1,8 +1,21 @@
 # DeLaN_Stribeck / RobotDynamics
-# 须在已激活的 conda 环境中安装: pip install -r requirements.txt
+# 须在已激活的 conda 环境中安装依赖。
 #
-# PyTorch 须从官方 CUDA 轮子源安装（勿用 conda 的 cpuonly，否则无 GPU）。
-# 与 DeLaN 环境一致: cu121（WSL + RTX 3090 已验证）
+# PyTorch 须从官方 CUDA 轮子源安装（勿用 conda 的 pytorch / cpuonly，否则无 GPU）。
+#
+# ========== RTX 50xx（Blackwell，sm_120，如 5060 Ti / 5070 / 5090）==========
+# 稳定版 torch 不支持 sm_120，须用 nightly cu128 安装 PyTorch（单独执行，一行即可）:
+#
+# pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+#
+# 然后再安装本文件其余依赖（不要再次安装下方 cu121 的 torch，以免被降级）:
+#
+# pip install numpy>=1.24.0 dill>=0.3.7 pytest>=7.0.0 matplotlib>=3.7.0 scipy>=1.10.0
+#
+# 验证: python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+#
+# ========== RTX 40xx 及更早 / WSL + RTX 3090 等 ==========
+# pip install -r requirements.txt
 
 --extra-index-url https://download.pytorch.org/whl/cu121
 torch>=2.3.0,<2.6.0
