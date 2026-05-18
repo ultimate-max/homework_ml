@@ -22,7 +22,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from RobotDynamics.FrictionModule import friction_pinn_loss, mysteric_losses, simulate_2dof_inverse_dynamics
+from RobotDynamics.FrictionModule import (
+    friction_pinn_loss,
+    friction_supervised_loss,
+    mysteric_losses,
+    simulate_2dof_inverse_dynamics,
+)
 from RobotDynamics.MystericNet import MystericNet
 
 
@@ -54,6 +59,13 @@ def main() -> None:
         default="tcn",
     )
     p.add_argument("--lambda-physics", type=float, default=0.5)
+    p.add_argument(
+        "--fri-loss",
+        choices=("mse", "smape"),
+        default="smape",
+        help="摩擦监督与 PINN 物理项",
+    )
+    p.add_argument("--smape-eps", type=float, default=1e-3)
     args = p.parse_args()
 
     args.save_dir.mkdir(parents=True, exist_ok=True)
@@ -102,6 +114,8 @@ def main() -> None:
                     tau_fri_true,
                     tau_phys,
                     lambda_physics=args.lambda_physics,
+                    fri_loss=args.fri_loss,
+                    smape_eps=args.smape_eps,
                 )
             else:
                 lf = torch.zeros((), device=device, dtype=qb.dtype)

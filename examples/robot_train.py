@@ -35,6 +35,7 @@ from RobotDynamics.DeLaN import load_dataset, suggest_hyper, torque_loss
 from RobotDynamics.FrictionModule import (
     build_mysteric_tensors,
     friction_pinn_loss,
+    friction_supervised_loss,
     load_pickle_trajectories,
     mysteric_losses,
     pickle_has_mcg_decomposition,
@@ -64,6 +65,8 @@ def _checkpoint_payload(
         "friction_loss_weight": args.friction_loss_weight,
         "energy_loss": args.energy_loss,
         "tau_loss": args.tau_loss,
+        "fri_loss": args.fri_loss,
+        "smape_eps": args.smape_eps,
         "data_path": str(args.data.resolve()),
     }
 
@@ -118,10 +121,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--friction-loss-weight",
         type=float,
-        default=0.01,
-        help="总损失中摩擦项系数: loss = l_tau + w_fri * l_fri。"
-        "SMAPE 力矩项 ~O(1)，MSE 摩擦项常为 O(10~100)，默认 0.01；"
-        "可设 0 关闭摩擦项（仅 l_tau）。",
+        default=1.0,
+        help="总损失: loss = l_tau + w_fri * l_fri（默认 1.0）。"
+        "l_tau 与 l_fri 均用 SMAPE 时量级相近；若 --fri-loss mse 仍很大可降到 0.01~0.1。",
     )
     p.add_argument("--energy-loss", action="store_true", help="总力矩 + 刚体能量守恒")
     p.add_argument(
@@ -129,6 +131,12 @@ def _parse_args() -> argparse.Namespace:
         choices=("mse", "smape"),
         default="smape",
         help="总力矩监督（多关节推荐 smape）",
+    )
+    p.add_argument(
+        "--fri-loss",
+        choices=("mse", "smape"),
+        default="smape",
+        help="摩擦监督与 PINN 物理项（多关节/小力矩关节推荐 smape，与 --tau-loss 独立可选）",
     )
     p.add_argument("--smape-eps", type=float, default=1e-3)
     p.add_argument("-m", nargs="?", const=0, default=0, type=int, help="保存 checkpoint")
@@ -203,6 +211,7 @@ def main() -> None:
     print(
         f"device={device}  n_dof={n_dof}  friction={args.friction_backend}  "
         f"λ_phys={args.lambda_physics}  w_fri={w_fri}  "
+        f"tau_loss={args.tau_loss}  fri_loss={args.fri_loss}  "
         f"train N={N}  test N={test_qp.shape[0]}"
     )
 
@@ -244,9 +253,16 @@ def main() -> None:
                         tau_phys,
                         lambda_physics=args.lambda_physics,
                         supervise_friction=supervise_fri,
+                        fri_loss=args.fri_loss,
+                        smape_eps=args.smape_eps,
                     )
                 elif supervise_fri:
-                    lf = torch.mean((tau_fri - tfb) ** 2)
+                    lf = friction_supervised_loss(
+                        tau_fri,
+                        tfb,
+                        args.fri_loss,
+                        smape_eps=args.smape_eps,
+                    )
 
                 ltau = torque_loss(tau_hat, taub, args.tau_loss, smape_eps=args.smape_eps)
                 loss = ltau + w_fri * lf
@@ -292,8 +308,12 @@ def main() -> None:
                 )
                 if epoch == 1 and w_fri > 0 and lf_m > 10 * max(lt_m, 1e-6):
                     print(
-                        "  提示: 未加权 l_fri 远大于 l_tau（量纲不同：SMAPE vs MSE）。"
-                        "可减小 --friction-loss-weight 或 --friction-label none。"
+                        "  提示: l_fri 远大于 l_tau，可减小 --friction-loss-weight，"
+                        "或确认 --fri-loss smape（与 --tau-loss 一致）。"
+                    )
+                elif epoch == 1 and w_fri < 0.05 and lf_m > 1e-6:
+                    print(
+                        "  提示: w_fri 过小，摩擦项对总损失贡献弱；SMAPE 摩擦下建议 --friction-loss-weight 1.0。"
                     )
 
     except KeyboardInterrupt:

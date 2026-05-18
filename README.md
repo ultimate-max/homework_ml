@@ -224,13 +224,14 @@ python examples/robot_train.py \
 
 \[
 \mathcal{L} = l_\tau + w_{\text{fri}}\, l_{\text{fri}} \;+\; [\;l_E\;]
-\quad\text{（默认 } w_{\text{fri}}=0.01\text{，见 \texttt{--friction-loss-weight}）}
+\quad\text{（默认 } w_{\text{fri}}=1.0\text{）}
 \]
 
 | 项 | 何时启用 | 含义 |
 |----|----------|------|
-| \(l_\tau\) | 始终 | 总力矩监督：`--tau-loss smape`（推荐）或 `mse`，对 \(\hat\tau=\tau_{\text{core}}+\hat\tau_{\text{fri}}\) 与测量 \(\tau\) |
-| \(l_{\text{fri}}\) | 数据含 `m,c,g` 分解，或 `stribeck_pinn` / `fo_cascade_pinn` | 有分解时 MSE\((\hat\tau_{\text{fri}},\tau-\tau_{\text{rigid}})\)；PINN 时为 \((1-\lambda)\) 数据项 \(+\lambda\) SCV 物理项（`--lambda-physics`） |
+| \(l_\tau\) | 始终 | `--tau-loss smape`（默认）或 `mse` |
+| \(l_{\text{fri}}\) | 有 `m/c/g` 或 PINN 后端 | **`--fri-loss smape`（默认）** 或 `mse`；与 \(l_\tau\) 相同 SMAPE 公式，利于小力矩关节。PINN：数据项 + SCV 项均用 `fri_loss` |
+| \(w_{\text{fri}}\) | `--friction-loss-weight` | SMAPE 摩擦下默认 **1.0**；仅当 `fri-loss mse` 且 \(l_{\text{fri}}\) 很大时用 **0.01~0.1** |
 | \(l_E\) | **仅**加 `--energy-loss` | Yeo 等 Eq. (7) 刚体能量率一致性，实现于 `RobotDynamics/FrictionModule/energy_loss.py` |
 
 能量项（可选）：
@@ -296,22 +297,27 @@ python examples/delan_evaluate.py \
 
 终端会打印 **Torque / Inertial / Coriolis / Gravity / Power** 等 MSE；`n_dof > 2` 时评估图为每个关节一行、四列（τ, m, c, g）。
 
-### 4.2 Mysteric-Net 评估（`robot_train.py` 训练的权重）
+### 4.2 Mysteric-Net 评估（关节摩擦网络 + 总力矩曲线图）
 
 **不要用** `delan_evaluate.py`（那只画 DeLaN 刚体四列图，默认 `figures/delan_performance.png`）。
 
-机械臂 pickle + `mysteric_robot.pt` 请用：
+在项目根目录、已 `conda activate frictionest` 时，生成 **各关节摩擦与总力矩对比图**：
 
 ```bash
+cd /path/to/FrictionEst
+
 python examples/robot_evaluate.py \
   --checkpoint checkpoints/mysteric_robot.pt \
   --data data/robot.pickle \
-  --test-labels e v q
+  --test-labels e v q \
+  --figure-out figures/robot_friction.png
 ```
 
-- **默认输出图**：`figures/robot_friction.png`（各关节 \(\tau\)、\(\tau_{\text{fri}}\) 等对比曲线）
-- 自定义路径：`--figure-out figures/my_robot_friction.png`
-- 弹窗：`--show`
+- **默认输出图**：`figures/robot_friction.png`（省略 `--figure-out` 时同上；含 \(\tau_{\text{fri}}\) 预测、参考分解、PINN 时还有 SCV 列）
+- **自定义路径**：`--figure-out figures/my_robot_friction.png`
+- **弹窗查看**：`--figure-out` 可省略，加 `--show` 不保存只显示
+- **`--seq-len`**：一般省略，从 checkpoint 自动读取（与训练一致，如 30）
+- 终端会打印 `RMSE τ_hat`、`RMSE τ_fri`（有 m/c/g 分解时）及 SCV 参数表（`fo_cascade_pinn` / `stribeck_pinn`）
 
 | checkpoint 来源 | 评估脚本 | 默认图片 |
 |-----------------|----------|----------|
