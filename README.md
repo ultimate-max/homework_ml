@@ -249,7 +249,7 @@ python examples/robot_train.py \
   --lambda-physics 0.5 \
   --tau-loss smape \
   --energy-loss \
-  -m 1
+  -m 1 --friction-label none --epochs 1000
 
 python examples/synthetic_train.py --data data/synthetic_2dof_inverse.npz --energy-loss -m 1
 ```
