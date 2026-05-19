@@ -14,6 +14,7 @@ DeLaN_Stribeck/
 │   ├── delan_train.py      # 仅训练 DeLaN（刚体）
 │   ├── delan_evaluate.py   # DeLaN 测试与绘图
 │   ├── robot_train.py      # L-Net + 摩擦（机械臂 pickle）
+│   ├── motor_identify_train.py  # 单电机惯量 J + 摩擦（n_dof=1）
 │   └── synthetic_train.py  # 2-DoF 合成数据冒烟训练
 ├── scripts/
 │   └── import_delan_data.py  # .mat / .npz → .pickle
@@ -95,10 +96,11 @@ g = {g1, g2, ...};                    % 重力项
 p = {p1, p2, ...};                    % 可置零
 pdot = {pdot1, pdot2, ...};           % 可置零
 
-save('robot.mat', 'labels','t','qp','qv','qa','tau','m','c','g','p','pdot', '-v7');
+dt = 0.001;   % 采样周期 (s)，导入时用于低通滤波 fs=1/dt（§2.3）
+save('robot.mat', 'labels','dt','t','qp','qv','qa','tau','m','c','g','p','pdot', '-v7');
 ```
 
-**单条轨迹**：`qp, qv, ...` 为 `T×n_dof` 数值矩阵，`labels` 为单个标签。
+**单条轨迹**：`qp, qv, ...` 为 `T×n_dof` 数值矩阵（单轴可为 `T×1` 或长度 `T` 的向量），`labels` 为单个标签。
 
 若在 MATLAB 中矩阵存为 **`n_dof×T`**，导入时加 `--transpose`。
 
@@ -140,7 +142,60 @@ python scripts/import_delan_data.py \
 
 也可从 **`.npz`** 导入（键名 `qp, qv, qa, tau` 或多轨迹 `traj0_qp, traj0_qv, ...`），用法见 `scripts/import_delan_data.py` 文件头注释。
 
-### 2.3 训练前检查数据
+### 2.3 导入时低通滤波（默认开启）
+
+`import_delan_data.py` 在写入 pickle **之前**，对运动/力矩序列做 **4 阶 Butterworth 低通 + `filtfilt`（零相位）**。
+
+| 项 | 说明 |
+|----|------|
+| 默认截止频率 | **200 Hz**（`--filter-cutoff`） |
+| 采样率 | \(f_s = 1/d_t\)：优先 `.mat` 内标量 **`dt`**，否则各轨迹 `mean(diff(t))` |
+| 默认滤波字段 | `qp`, `qv`, `qa`, `tau`, `p`, `pdot`（**不**滤 `m/c/g`） |
+| 约束 | 需 \(f_c < f_s/2\)（Nyquist），否则脚本报错 |
+
+```bash
+# 默认 fc=200 Hz（电机数据 dt=0.001 → fs=1000 Hz 时合法）
+python scripts/import_delan_data.py \
+  -i data/motor_character_data.mat \
+  -o data/motor_data.pickle
+
+# 自定义截止频率
+python scripts/import_delan_data.py \
+  -i data/robot.mat \
+  -o data/robot.pickle \
+  --filter-cutoff 100
+
+# 关闭滤波
+python scripts/import_delan_data.py \
+  -i data/robot.mat \
+  -o data/robot.pickle \
+  --no-filter
+
+# 显式指定采样周期（覆盖 .mat 内 dt）
+python scripts/import_delan_data.py \
+  -i traj.npz \
+  -o data/out.pickle \
+  --dt-hint 0.001 \
+  --filter-cutoff 150
+
+# 只滤部分字段
+python scripts/import_delan_data.py \
+  -i data/robot.mat \
+  -o data/robot.pickle \
+  --filter-keys qp qv tau
+```
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--filter-cutoff` | `200` | 截止频率 (Hz) |
+| `--no-filter` | 关 | 不做低通 |
+| `--filter-order` | `4` | Butterworth 阶数 |
+| `--dt-hint` | 无 | 采样周期 (s)，覆盖 `.mat` 的 `dt` |
+| `--filter-keys` | 见上表 | 要滤波的变量名列表 |
+
+实现见 `RobotDynamics/DeLaN/signal_filter.py`。单轴 `.mat` 中 `qp` 等为 `(T,)` 一维向量时，导入脚本会自动 reshape 为 `(T, 1)`（见 `mat_convert.py`）。
+
+### 2.4 训练前检查数据
 
 ```bash
 python examples/delan_train.py --inspect --data data/robot.pickle
@@ -256,7 +311,96 @@ python examples/synthetic_train.py --data data/synthetic_2dof_inverse.npz --ener
 
 默认保存：`checkpoints/mysteric_robot.pt`（需 `-m 1`）。**Ctrl+C 中断训练**时会自动保存当前权重：若已加 `-m 1` 则写入 `--save` 路径，否则写入 `checkpoints/mysteric_robot_interrupt.pt`（checkpoint 中含 `epoch`、`interrupted` 字段）。
 
-### 3.3 2-DoF 合成数据（快速冒烟）
+### 3.3 单电机惯量 + 摩擦辨识（`motor_identify_train.py`）
+
+适用于 **单轴伺服 / 电机**（`n_dof=1`）：用 **DeLaN** 学等效惯量 \(H \approx J\)，用 **`fo_cascade_pinn`** 学摩擦；固定不监督摩擦标签（无 m/c/g 分解时与 `robot_train.py --friction-label none` + PINN 等价，但脚本已封装默认超参与辨识报告）。
+
+**物理假设**（水平安装或重力已补偿）：
+
+\[
+\tau = J\,\ddot q + \tau_{\text{fri}}, \quad c \approx 0,\; g \approx 0
+\]
+
+竖直轴且未重力补偿时，网络可能学到非零 \(g(q)\)，惯量仍在 \(H\) 中，需结合残余 `g_rms` 判断。
+
+#### 数据准备
+
+每条轨迹需 **`qp, qv, qa, tau`**，形状 **`(T, 1)`**（时间在行上）。单位建议统一为 rad、rad/s、rad/s²、N·m。
+
+| 格式 | 说明 |
+|------|------|
+| `.pickle` | DeLaN 官方多轨迹格式（见 §2） |
+| `.npz` | 扁平键 `qp, qv, qa, tau`（可选 `t`）；导入逻辑同 `import_delan_data.py` |
+
+```bash
+# MATLAB / 采集 → .mat 时，先转为 pickle（单轴列数为 1；默认 200 Hz 低通）
+python scripts/import_delan_data.py \
+  -i data/motor_character_data.mat \
+  -o data/motor_data.pickle
+# 不需要滤波时加 --no-filter；改截止频率用 --filter-cutoff（见 §2.3）
+
+# 检查 n_dof=1
+python examples/motor_identify_train.py --data data/motor.pickle --inspect
+```
+
+**激励**：轨迹应覆盖足够大的 \(|\ddot q|\) 与 \(|\dot q|\)（正反转、加减速、扫频等），否则 \(J\) 与摩擦难以分离。
+
+#### 训练
+
+```bash
+conda activate frictionest
+cd /path/to/DeLaN_Stribeck
+
+python examples/motor_identify_train.py \
+  --data data/motor.pickle \
+  --known-J 0.0023 \
+  --test-frac 0.2 \
+  --epochs 800 \
+  -m 1
+```
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--data` | `data/motor.pickle` | `.pickle` 或 `.npz` |
+| `--known-J` | 无 | 已知惯量 (kg·m²)，仅用于打印相对误差 |
+| `--test-frac` | `0.2` | 无匹配 `--test-labels` 时，最后 20% 轨迹作测试 |
+| `--test-labels` | `e v q` | 与机械臂相同；电机数据可改自定义标签 |
+| `--epochs` | `800` | 单轴常惯量可适当加大 |
+| `--lnet-width` / `--lnet-depth` | `32` / `2` | 小于多轴默认，减轻 \(H(q)\) 过拟合 |
+| `--lambda-physics` | `0.5` | PINN 摩擦 SCV 项权重 |
+| `-m 1` | 关 | 保存 `checkpoints/motor_identify.pt` |
+| `--save` | `checkpoints/motor_identify.pt` | 自定义路径 |
+
+**损失**（与 §3.2 一致，细节见 [`RobotDynamics/FrictionModule/readme.md`](RobotDynamics/FrictionModule/readme.md)）：
+
+\[
+\mathcal{L} = l_\tau + w_{\text{fri}}\, l_{\text{fri}}, \quad
+l_{\text{fri}} = \lambda\,\text{loss}(\hat\tau_{\text{fri}},\,\tau_{\text{fri,physics}})
+\]
+
+无 \(\tau_{\text{fri}}\) 真值时仅 PINN 物理项 + 总力矩 \(l_\tau\)。训练中每 50 epoch 打印 `J_med`、`c_rms`、`g_rms`；结束后输出完整辨识表（\(J\) 取 \(H_{00}\) 中位数、SCV 参数等）。checkpoint 含字段 `motor_identify`、`J_est`。
+
+#### 评估
+
+与 Mysteric 相同，用 `robot_evaluate.py` 画 \(\tau_{\text{fri}}\) 与总力矩曲线：
+
+```bash
+python examples/robot_evaluate.py \
+  --checkpoint checkpoints/motor_identify.pt \
+  --data data/motor.pickle \
+  --test-frac 0.2 \
+  --figure-out figures/motor_friction.png
+```
+
+终端会打印学到的 **SCV 参数**；惯量以训练结束时的 **`J_est` / `J_med`** 为准（非 SCV 参数）。
+
+#### 注意
+
+- 辨识的是**数据上的等效惯量**（含减速器反射惯量等），不是 datasheet 裸转子 \(J\) 的唯一值。
+- `m/c/g` 全零的 pickle **不能**用于监督 \(\tau_{\text{fri}}\)；本脚本已固定 `supervise_friction=False`。
+- 多轴电机请用 §3.2 `robot_train.py`，不要用本脚本。
+
+### 3.4 2-DoF 合成数据（快速冒烟）
 
 ```bash
 python scripts/generate_dataset.py
@@ -323,6 +467,7 @@ python examples/robot_evaluate.py \
 |-----------------|----------|----------|
 | `delan_train.py` → `delan_lnet.pt` | `examples/delan_evaluate.py` | `figures/delan_performance.png` |
 | `robot_train.py` → `mysteric_robot.pt` | `examples/robot_evaluate.py` | **`figures/robot_friction.png`** |
+| `motor_identify_train.py` → `motor_identify.pt` | `examples/robot_evaluate.py` | 同上（单轴一行图） |
 
 合成 2-DoF `.npz` 测试（无绘图或仅数值）可用：
 

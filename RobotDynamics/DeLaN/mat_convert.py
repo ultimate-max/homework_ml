@@ -73,12 +73,29 @@ def _strip_mat_meta(mat: dict) -> dict:
     return out
 
 
-def _infer_n_dof_from_qp(qp: np.ndarray, transpose: bool) -> int:
+def _read_mat_n_dof(mat: dict) -> int | None:
+    """读取 .mat 中的 ``n_dof`` 字段（单轴电机等常为 1）。"""
+    if "n_dof" not in mat:
+        return None
+    val = np.asarray(mat["n_dof"], dtype=np.int64).reshape(-1)
+    if val.size == 0:
+        return None
+    n = int(val[0])
+    return n if n > 0 else None
+
+
+def _infer_n_dof_from_qp(
+    qp: np.ndarray, transpose: bool, *, known_n_dof: int | None = None
+) -> int:
+    if known_n_dof is not None and known_n_dof > 0:
+        return int(known_n_dof)
     a = np.asarray(qp, dtype=np.float64)
+    if a.ndim == 1:
+        return 1
     if transpose:
         a = a.T
     if a.ndim != 2:
-        raise ValueError(f"推断 n_dof 需要 qp 为二维矩阵，得到 shape={a.shape}")
+        raise ValueError(f"推断 n_dof 需要 qp 为一维或二维，得到 shape={a.shape}")
     r, c = a.shape
     if r == c:
         raise ValueError(
@@ -118,8 +135,15 @@ def _normalize_label(x) -> str:
 
 def _maybe_transpose_joints(a: np.ndarray, n_dof: int, transpose: bool) -> np.ndarray:
     a = np.asarray(a, dtype=np.float64)
-    if a.ndim != 2:
-        raise ValueError(f"期望轨迹矩阵为 2 维，得到 shape={a.shape}")
+    if a.ndim == 1:
+        if n_dof != 1:
+            raise ValueError(
+                f"一维轨迹长度 {a.size}，但 n_dof={n_dof}；"
+                "多轴数据请存为 (T, n_dof) 或 (n_dof, T)。"
+            )
+        a = a.reshape(-1, 1)
+    elif a.ndim != 2:
+        raise ValueError(f"期望轨迹为 (T,) 或 (T, n_dof)，得到 shape={a.shape}")
     if transpose:
         a = a.T
     if a.shape[0] == n_dof and a.shape[1] != n_dof:
@@ -133,8 +157,16 @@ def _maybe_transpose_joints(a: np.ndarray, n_dof: int, transpose: bool) -> np.nd
 
 def _maybe_transpose_mass(a: np.ndarray, n_dof: int) -> np.ndarray:
     a = np.asarray(a, dtype=np.float64)
-    if a.ndim != 3:
-        raise ValueError(f"mass_matrix 期望 3 维，得到 shape={a.shape}")
+    if a.ndim == 1:
+        if n_dof != 1:
+            raise ValueError(
+                f"mass_matrix 为一维 (T,)，但 n_dof={n_dof}；单轴请提供标量惯量序列。"
+            )
+        a = a.reshape(-1, 1, 1)
+    elif a.ndim == 2 and n_dof == 1 and a.shape[1] == 1:
+        a = a.reshape(a.shape[0], 1, 1)
+    elif a.ndim != 3:
+        raise ValueError(f"mass_matrix 期望 1/2/3 维，得到 shape={a.shape}")
     if a.shape[0] == n_dof and a.shape[1] == n_dof and a.shape[2] != n_dof:
         a = np.transpose(a, (2, 0, 1))
     if a.shape[1] != n_dof or a.shape[2] != n_dof:
@@ -237,8 +269,16 @@ def mat_to_pickle_dict(
     labels, series_dict, mm_list = _coerce_to_per_trajectory_lists(mat)
     n_traj = len(labels)
 
+    mat_n_dof = _read_mat_n_dof(mat)
     if n_dof is None:
-        n_dof = _infer_n_dof_from_qp(series_dict["qp"][0], transpose)
+        n_dof = _infer_n_dof_from_qp(
+            series_dict["qp"][0], transpose, known_n_dof=mat_n_dof
+        )
+    elif mat_n_dof is not None and int(n_dof) != mat_n_dof:
+        print(
+            f"警告: CLI --n-dof={n_dof} 与 .mat 中 n_dof={mat_n_dof} 不一致，使用 CLI 值。",
+            file=sys.stderr,
+        )
 
     t_list = series_dict["t"]
     qp_list = series_dict["qp"]

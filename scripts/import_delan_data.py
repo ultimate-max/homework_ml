@@ -6,6 +6,13 @@
   # MATLAB（与官方 tools/mat_to_character_pickle 相同约定）
   python scripts/import_delan_data.py -i robot.mat -o data/robot.pickle --transpose
 
+  # 默认对 qp/qv/qa/tau 等做 200 Hz 低通（采样率由 .mat 的 dt 或 t 推断）
+  python scripts/import_delan_data.py -i data/motor_character_data.mat -o data/motor.pickle
+
+  # 指定截止频率 / 关闭滤波
+  python scripts/import_delan_data.py -i robot.mat -o data/robot.pickle --filter-cutoff 100
+  python scripts/import_delan_data.py -i robot.mat -o data/robot.pickle --no-filter
+
   # 单条 npz: 键 qp, qv, qa, tau [, t, m, c, g]
   python scripts/import_delan_data.py -i traj.npz -o data/robot.pickle
 
@@ -19,8 +26,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -33,9 +38,13 @@ from RobotDynamics.DeLaN import (
     save_pickle,
     suggest_hyper,
 )
+from RobotDynamics.DeLaN.signal_filter import (
+    filter_character_data,
+    read_mat_scalar_dt,
+)
 
 
-def main() -> int:
+def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="导入 DeLaN 训练用 character_data.pickle")
     p.add_argument("-i", "--input", type=Path, help="输入 .mat 或 .npz")
     p.add_argument("-o", "--output", type=Path, help="输出 .pickle")
@@ -48,14 +57,51 @@ def main() -> int:
         action="store_true",
         help="导入后按样本量打印推荐超参（delan_model 基准）",
     )
-    args = p.parse_args()
+    g = p.add_mutually_exclusive_group()
+    g.add_argument(
+        "--filter-cutoff",
+        type=float,
+        default=200.0,
+        metavar="HZ",
+        help="导入后低通滤波截止频率 (Hz)，默认 200；采样率 fs=1/dt",
+    )
+    g.add_argument(
+        "--no-filter",
+        action="store_true",
+        help="不做低通滤波",
+    )
+    p.add_argument(
+        "--filter-order",
+        type=int,
+        default=4,
+        help="Butterworth 滤波器阶数，默认 4",
+    )
+    p.add_argument(
+        "--dt-hint",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="显式采样周期 (s)，覆盖 .mat 内 dt 与各轨迹 t 的推断",
+    )
+    p.add_argument(
+        "--filter-keys",
+        nargs="+",
+        default=None,
+        help="要滤波的字段，默认 qp qv qa tau p pdot",
+    )
+    return p.parse_args()
+
+
+def main() -> int:
+    args = _parse_args()
 
     if args.inspect:
         print(inspect_dataset(args.inspect))
         return 0
 
     if args.input is None or args.output is None:
-        p.error("导入需同时指定 -i 与 -o（或仅用 --inspect）")
+        print("导入需同时指定 -i 与 -o（或仅用 --inspect）", file=sys.stderr)
+        return 1
 
     if not args.input.is_file():
         print(f"找不到: {args.input}", file=sys.stderr)
@@ -74,6 +120,20 @@ def main() -> int:
     else:
         print("仅支持 .mat / .npz", file=sys.stderr)
         return 1
+
+    if not args.no_filter:
+        dt_hint = args.dt_hint
+        if dt_hint is None and suf == ".mat":
+            dt_hint = read_mat_scalar_dt(args.input, root=args.root)
+        if dt_hint is not None:
+            print(f"滤波采样周期 dt={dt_hint:g} s (fs={1.0/dt_hint:g} Hz)", file=sys.stderr)
+        filter_character_data(
+            data,
+            cutoff_hz=float(args.filter_cutoff),
+            order=int(args.filter_order),
+            keys=tuple(args.filter_keys) if args.filter_keys else None,
+            dt_hint=dt_hint,
+        )
 
     save_pickle(data, args.output)
     print(f"已写入 {args.output}")

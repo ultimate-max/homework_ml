@@ -44,6 +44,19 @@ def _infer_lnet_hyper(state: dict) -> tuple[int, int]:
     return n_width, n_depth
 
 
+def _infer_fo_mlp_blocks(state: dict) -> int:
+    """从 fo_cascade ResMLP 的 blocks.* 推断残差块个数。"""
+    block_ids: list[int] = []
+    for k in state:
+        if k.startswith("hnet.fo.stribeck_mlp.blocks.") and ".fc1.weight" in k:
+            parts = k.split(".")
+            try:
+                block_ids.append(int(parts[3]))
+            except (IndexError, ValueError):
+                continue
+    return max(block_ids) + 1 if block_ids else 6
+
+
 def _infer_pinn_hidden(state: dict, dof: int) -> tuple[int, ...]:
     """从 checkpoint 的 Linear 层推断 MLP 隐层宽度（不含输出层 dof）。"""
     widths: list[int] = []
@@ -74,6 +87,10 @@ def load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[Mysteric
     )
     if backend == "stribeck_pinn":
         kw["stribeck_hidden"] = _infer_pinn_hidden(state, dof)
+    elif backend in ("fo_cascade", "fo_cascade_pinn"):
+        kw["fo_mlp_hidden_layers"] = int(
+            ckpt.get("fo_mlp_hidden_layers", _infer_fo_mlp_blocks(state))
+        )
     model = MystericNet(**kw).to(device)
     model.load_state_dict(state)
     model.eval()

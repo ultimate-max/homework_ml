@@ -27,6 +27,7 @@ def test_stribeck_resmlp_depth_and_gradient() -> None:
     x = torch.randn(5, 6, requires_grad=True)
     y = mlp(x)
     assert y.shape == (5, 6)
+    assert y.abs().max().item() <= 1.0
     y.sum().backward()
     assert x.grad is not None
 

@@ -112,7 +112,7 @@ class _CausalIntegrator1s(nn.Module):
 
 
 class _StribeckResBlock(nn.Module):
-    """残差块：y = x + W₂(Tanh(W₁(Tanh(x))))，便于加深 Stribeck 非线性支路。"""
+    """残差块：y = x + W₂(ReLU(W₁(x)))。"""
 
     def __init__(self, dim: int) -> None:
         super().__init__()
@@ -124,7 +124,7 @@ class _StribeckResBlock(nn.Module):
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = torch.tanh(self.fc1(x))
+        h = F.relu(self.fc1(x))
         return x + self.fc2(h)
 
 
@@ -132,6 +132,7 @@ class StribeckResMLP(nn.Module):
     """
     逐时刻 ResNet 式 Stribeck MLP（对 ``v_seq`` 每个时间步独立、权重共享）。
 
+    隐层与残差块内使用 ReLU（梯度比 tanh 更陡）；末层 ``out_proj`` 后接 tanh 平滑有界输出。
     ``num_blocks`` 个残差块堆叠在隐空间 ``hidden_dim`` 上。
     """
 
@@ -157,10 +158,10 @@ class StribeckResMLP(nn.Module):
         nn.init.zeros_(self.out_proj.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = torch.tanh(self.in_proj(x))
+        h = F.relu(self.in_proj(x))
         for blk in self.blocks:
             h = blk(h)
-        return self.out_proj(h)
+        return torch.tanh(self.out_proj(h))
 
 
 def _build_stribeck_mlp(
