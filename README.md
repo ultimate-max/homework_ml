@@ -149,9 +149,9 @@ python scripts/import_delan_data.py \
 | 项 | 说明 |
 |----|------|
 | 默认截止频率 | **200 Hz**（`--filter-cutoff`） |
-| 采样率 | \(f_s = 1/d_t\)：优先 `.mat` 内标量 **`dt`**，否则各轨迹 `mean(diff(t))` |
+| 采样率 | $f_s = 1/d_t$：优先 `.mat` 内标量 **`dt`**，否则各轨迹 `mean(diff(t))` |
 | 默认滤波字段 | `qp`, `qv`, `qa`, `tau`, `p`, `pdot`（**不**滤 `m/c/g`） |
-| 约束 | 需 \(f_c < f_s/2\)（Nyquist），否则脚本报错 |
+| 约束 | 需 $f_c < f_s/2$（Nyquist），否则脚本报错 |
 
 ```bash
 # 默认 fc=200 Hz（电机数据 dt=0.001 → fs=1000 Hz 时合法）
@@ -243,10 +243,10 @@ python examples/delan_train.py \
 | `-c 1` | 使用 CUDA（默认） |
 | `-l 1` | 仅加载权重，不训练 |
 | `--load path` | 指定 checkpoint |
-| `--no-energy-loss` | 默认带能量项；加此开关则**仅**用力矩损失 \(l_\tau\) |
+| `--no-energy-loss` | 默认带能量项；加此开关则**仅**用力矩损失 $l_\tau$ |
 
-**损失（仅 DeLaN）**：默认 \(\mathcal{L} = l_\tau + l_E\)。\(l_\tau\) 为 `mse` 或 `smape`；\(l_E\) 为刚体功率守恒  
-\(\mathbb{E}[(\mathrm{d}T/\mathrm{d}t + \mathrm{d}V/\mathrm{d}t - \tau^\top \dot q)^2]\)（由 `LNet.dynamics` 的 `dTdt`、`dVdt` 计算）。实现见 `RobotDynamics/DeLaN/train_core.py`。
+**损失（仅 DeLaN）**：默认 $\mathcal{L} = l_\tau + l_E$。$l_\tau$ 为 `mse` 或 `smape`；$l_E$ 为刚体功率守恒  
+$\mathbb{E}[(\mathrm{d}T/\mathrm{d}t + \mathrm{d}V/\mathrm{d}t - \tau^\top \dot q)^2]$（由 `LNet.dynamics` 的 `dTdt`、`dVdt` 计算）。实现见 `RobotDynamics/DeLaN/train_core.py`。
 
 权重默认路径：`checkpoints/delan_lnet.pt`。
 
@@ -271,31 +271,31 @@ python examples/robot_train.py \
 |----------------------|------|
 | `tcn` | 时序卷积（原 Mysteric-Net 论文） |
 | `fo_cascade` | TCN₁([q,q̇])→MLP→**1/s**→TCN₂，对齐 Xun 分数阶摩擦图 4（MLP 后因果积分低通） |
-| `fo_cascade_pinn` | fo_cascade + SCV，`friction_pinn_loss`（Hu 等 PINN，\(\lambda\)=`--lambda-physics`） |
+| `fo_cascade_pinn` | fo_cascade + SCV，`friction_pinn_loss`（Hu 等 PINN，$\lambda$=`--lambda-physics`） |
 | `stribeck` | 可学习 Stribeck-Coulomb-Viscous 物理模型 |
 | `stribeck_pinn` | MLP + SCV 物理损失（Hu 等 PINN） |
 
 **损失（Mysteric-Net，默认不含能量项）**：
 
-\[
+$$
 \mathcal{L} = l_\tau + w_{\text{fri}}\, l_{\text{fri}} \;+\; [\;l_E\;]
 \quad\text{（默认 } w_{\text{fri}}=1.0\text{）}
-\]
+$$
 
 | 项 | 何时启用 | 含义 |
 |----|----------|------|
-| \(l_\tau\) | 始终 | `--tau-loss smape`（默认）或 `mse` |
-| \(l_{\text{fri}}\) | 有 `m/c/g` 或 PINN 后端 | **`--fri-loss smape`（默认）** 或 `mse`；与 \(l_\tau\) 相同 SMAPE 公式，利于小力矩关节。PINN：数据项 + SCV 项均用 `fri_loss` |
-| \(w_{\text{fri}}\) | `--friction-loss-weight` | SMAPE 摩擦下默认 **1.0**；仅当 `fri-loss mse` 且 \(l_{\text{fri}}\) 很大时用 **0.01~0.1** |
-| \(l_E\) | **仅**加 `--energy-loss` | Yeo 等 Eq. (7) 刚体能量率一致性，实现于 `RobotDynamics/FrictionModule/energy_loss.py` |
+| $l_\tau$ | 始终 | `--tau-loss smape`（默认）或 `mse` |
+| $l_{\text{fri}}$ | 有 `m/c/g` 或 PINN 后端 | **`--fri-loss smape`（默认）** 或 `mse`；与 $l_\tau$ 相同 SMAPE 公式，利于小力矩关节。PINN：数据项 + SCV 项均用 `fri_loss` |
+| $w_{\text{fri}}$ | `--friction-loss-weight` | SMAPE 摩擦下默认 **1.0**；仅当 `fri-loss mse` 且 $l_{\text{fri}}$ 很大时用 **0.01~0.1** |
+| $l_E$ | **仅**加 `--energy-loss` | Yeo 等 Eq. (7) 刚体能量率一致性，实现于 `RobotDynamics/FrictionModule/energy_loss.py` |
 
 能量项（可选）：
 
-\[
+$$
 l_E = \mathbb{E}\left[\left(\frac{\mathrm{d}T}{\mathrm{d}t}+\frac{\mathrm{d}V}{\mathrm{d}t} - (\tau-\hat\tau_{\text{fri}})^\top \dot q\right)^2\right]
-\]
+$$
 
-其中 \(\mathrm{d}T/\mathrm{d}t+\mathrm{d}V/\mathrm{d}t\) 由 **L-Net** 的 `dynamics()` 给出；\((\tau-\hat\tau_{\text{fri}})^\top\dot q\) 把摩擦从总力矩中剥离后的功率残差。开启 `--energy-loss` 时训练更慢（需 L-Net 能量率前向），合成数据上同样可用：
+其中 $\mathrm{d}T/\mathrm{d}t+\mathrm{d}V/\mathrm{d}t$ 由 **L-Net** 的 `dynamics()` 给出；$(\tau-\hat\tau_{\text{fri}})^\top\dot q$ 把摩擦从总力矩中剥离后的功率残差。开启 `--energy-loss` 时训练更慢（需 L-Net 能量率前向），合成数据上同样可用：
 
 ```bash
 python examples/robot_train.py \
@@ -313,15 +313,15 @@ python examples/synthetic_train.py --data data/synthetic_2dof_inverse.npz --ener
 
 ### 3.3 单电机惯量 + 摩擦辨识（`motor_identify_train.py`）
 
-适用于 **单轴伺服 / 电机**（`n_dof=1`）：用 **DeLaN** 学等效惯量 \(H \approx J\)，用 **`fo_cascade_pinn`** 学摩擦；固定不监督摩擦标签（无 m/c/g 分解时与 `robot_train.py --friction-label none` + PINN 等价，但脚本已封装默认超参与辨识报告）。
+适用于 **单轴伺服 / 电机**（`n_dof=1`）：用 **DeLaN** 学等效惯量 $H \approx J$，用 **`fo_cascade_pinn`** 学摩擦；固定不监督摩擦标签（无 m/c/g 分解时与 `robot_train.py --friction-label none` + PINN 等价，但脚本已封装默认超参与辨识报告）。
 
 **物理假设**（水平安装或重力已补偿）：
 
-\[
+$$
 \tau = J\,\ddot q + \tau_{\text{fri}}, \quad c \approx 0,\; g \approx 0
-\]
+$$
 
-竖直轴且未重力补偿时，网络可能学到非零 \(g(q)\)，惯量仍在 \(H\) 中，需结合残余 `g_rms` 判断。
+竖直轴且未重力补偿时，网络可能学到非零 $g(q)$，惯量仍在 $H$ 中，需结合残余 `g_rms` 判断。
 
 #### 数据准备
 
@@ -343,7 +343,7 @@ python scripts/import_delan_data.py \
 python examples/motor_identify_train.py --data data/motor.pickle --inspect
 ```
 
-**激励**：轨迹应覆盖足够大的 \(|\ddot q|\) 与 \(|\dot q|\)（正反转、加减速、扫频等），否则 \(J\) 与摩擦难以分离。
+**激励**：轨迹应覆盖足够大的 $|\ddot q|$ 与 $|\dot q|$（正反转、加减速、扫频等），否则 $J$ 与摩擦难以分离。
 
 #### 训练
 
@@ -366,23 +366,23 @@ python examples/motor_identify_train.py \
 | `--test-frac` | `0.2` | 无匹配 `--test-labels` 时，最后 20% 轨迹作测试 |
 | `--test-labels` | `e v q` | 与机械臂相同；电机数据可改自定义标签 |
 | `--epochs` | `800` | 单轴常惯量可适当加大 |
-| `--lnet-width` / `--lnet-depth` | `32` / `2` | 小于多轴默认，减轻 \(H(q)\) 过拟合 |
+| `--lnet-width` / `--lnet-depth` | `32` / `2` | 小于多轴默认，减轻 $H(q)$ 过拟合 |
 | `--lambda-physics` | `0.5` | PINN 摩擦 SCV 项权重 |
 | `-m 1` | 关 | 保存 `checkpoints/motor_identify.pt` |
 | `--save` | `checkpoints/motor_identify.pt` | 自定义路径 |
 
 **损失**（与 §3.2 一致，细节见 [`RobotDynamics/FrictionModule/readme.md`](RobotDynamics/FrictionModule/readme.md)）：
 
-\[
+$$
 \mathcal{L} = l_\tau + w_{\text{fri}}\, l_{\text{fri}}, \quad
 l_{\text{fri}} = \lambda\,\text{loss}(\hat\tau_{\text{fri}},\,\tau_{\text{fri,physics}})
-\]
+$$
 
-无 \(\tau_{\text{fri}}\) 真值时仅 PINN 物理项 + 总力矩 \(l_\tau\)。训练中每 50 epoch 打印 `J_med`、`c_rms`、`g_rms`；结束后输出完整辨识表（\(J\) 取 \(H_{00}\) 中位数、SCV 参数等）。checkpoint 含字段 `motor_identify`、`J_est`。
+无 $\tau_{\text{fri}}$ 真值时仅 PINN 物理项 + 总力矩 $l_\tau$。训练中每 50 epoch 打印 `J_med`、`c_rms`、`g_rms`；结束后输出完整辨识表（$J$ 取 $H_{00}$ 中位数、SCV 参数等）。checkpoint 含字段 `motor_identify`、`J_est`。
 
 #### 评估
 
-与 Mysteric 相同，用 `robot_evaluate.py` 画 \(\tau_{\text{fri}}\) 与总力矩曲线：
+与 Mysteric 相同，用 `robot_evaluate.py` 画 $\tau_{\text{fri}}$ 与总力矩曲线：
 
 ```bash
 python examples/robot_evaluate.py \
@@ -396,8 +396,8 @@ python examples/robot_evaluate.py \
 
 #### 注意
 
-- 辨识的是**数据上的等效惯量**（含减速器反射惯量等），不是 datasheet 裸转子 \(J\) 的唯一值。
-- `m/c/g` 全零的 pickle **不能**用于监督 \(\tau_{\text{fri}}\)；本脚本已固定 `supervise_friction=False`。
+- 辨识的是**数据上的等效惯量**（含减速器反射惯量等），不是 datasheet 裸转子 $J$ 的唯一值。
+- `m/c/g` 全零的 pickle **不能**用于监督 $\tau_{\text{fri}}$；本脚本已固定 `supervise_friction=False`。
 - 多轴电机请用 §3.2 `robot_train.py`，不要用本脚本。
 
 ### 3.4 2-DoF 合成数据（快速冒烟）
@@ -457,7 +457,7 @@ python examples/robot_evaluate.py \
   --figure-out figures/robot_friction.png
 ```
 
-- **默认输出图**：`figures/robot_friction.png`（省略 `--figure-out` 时同上；含 \(\tau_{\text{fri}}\) 预测、参考分解、PINN 时还有 SCV 列）
+- **默认输出图**：`figures/robot_friction.png`（省略 `--figure-out` 时同上；含 $\tau_{\text{fri}}$ 预测、参考分解、PINN 时还有 SCV 列）
 - **自定义路径**：`--figure-out figures/my_robot_friction.png`
 - **弹窗查看**：`--figure-out` 可省略，加 `--show` 不保存只显示
 - **`--seq-len`**：一般省略，从 checkpoint 自动读取（与训练一致，如 30）

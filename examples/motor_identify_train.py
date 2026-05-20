@@ -9,6 +9,8 @@
 示例:
   python examples/motor_identify_train.py --data data/motor.npz -m 1
   python examples/motor_identify_train.py --data data/motor.pickle --known-J 0.0023 -m 1
+  python examples/motor_identify_train.py --data data/motor.pickle --known-J 0.00243 \\
+      --lnet-mass-eps 1e-4 -m 1
   python examples/motor_identify_train.py --inspect --data data/motor.pickle
 """
 
@@ -179,6 +181,8 @@ def _checkpoint_payload(
         "smape_eps": args.smape_eps,
         "data_path": str(args.data.resolve()),
         "fo_mlp_hidden_layers": args.fo_mlp_hidden_layers,
+        "mass_diag_eps": args.lnet_mass_eps,
+        "lnet_numerical_H_ridge": args.lnet_mass_eps,
     }
     if report is not None:
         payload["J_est"] = report.j_median
@@ -240,10 +244,10 @@ def _parse_args() -> argparse.Namespace:
         metavar="J",
         help="已知转子/反射惯量 (kg·m²)，用于打印相对误差",
     )
-    p.add_argument("--seq-len", type=int, default=30)
+    p.add_argument("--seq-len", type=int, default=20)
     p.add_argument("--epochs", type=int, default=800)
     p.add_argument("--batch", type=int, default=256)
-    p.add_argument("--lr", type=float, default=1e-2)
+    p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument(
         "--lnet-width",
         type=int,
@@ -251,7 +255,15 @@ def _parse_args() -> argparse.Namespace:
         help="单轴常惯量可用较小 L-Net（默认 32）",
     )
     p.add_argument("--lnet-depth", type=int, default=2)
-    p.add_argument("--fo-mlp-hidden-layers", type=int, default=4)
+    p.add_argument(
+        "--lnet-mass-eps",
+        type=float,
+        default=1e-2,
+        metavar="EPS",
+        help="L-Net 质量对角初值 b 与 H 数值脊 εI（默认 1e-2；"
+        "J 卡在 0.01 时可试 1e-4~1e-3，需与真实 J 量级匹配）",
+    )
+    p.add_argument("--fo-mlp-hidden-layers", type=int, default=2)
     p.add_argument("--lambda-physics", type=float, default=0.5)
     p.add_argument("--friction-loss-weight", type=float, default=1.0)
     p.add_argument("--tau-loss", choices=("mse", "smape"), default="smape")
@@ -326,6 +338,9 @@ def main() -> None:
     qd_seq = tensors["qd_seq"]
 
     l_w, l_d = args.lnet_width, args.lnet_depth
+    mass_eps = float(args.lnet_mass_eps)
+    if mass_eps <= 0:
+        raise SystemExit(f"--lnet-mass-eps 须为正数，当前 {mass_eps}")
     model = MystericNet(
         dof=1,
         seq_len=args.seq_len,
@@ -333,6 +348,8 @@ def main() -> None:
         lnet_layers=l_d,
         friction_backend=FRICTION_BACKEND,
         fo_mlp_hidden_layers=args.fo_mlp_hidden_layers,
+        mass_diag_eps=mass_eps,
+        lnet_numerical_H_ridge=mass_eps,
     ).to(device)
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5, amsgrad=True)
@@ -343,8 +360,8 @@ def main() -> None:
     print(
         "单电机辨识训练  model=DeLaN+fo_cascade_pinn  supervise_τ_fri=False\n"
         f"  device={device}  train_N={N}  test_N={test_qp.shape[0]}  "
-        f"λ_phys={args.lambda_physics}  w_fri={w_fri}\n"
-        f"  提示: 激励需覆盖足够 |q̈| 与 |q̇|，否则 J 与摩擦难分离。"
+        f"λ_phys={args.lambda_physics}  w_fri={w_fri}  lnet_mass_eps={mass_eps:.2e}\n"
+        f"  提示: 激励需覆盖足够 |q̈| 与 |q̇|；J_med 若恒等于 mass_eps 可再减小 --lnet-mass-eps。"
     )
 
     last_epoch = 0
