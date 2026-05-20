@@ -71,6 +71,37 @@ def _load_raw(path: Path) -> dict[str, Any]:
         return pickle.load(f)
 
 
+def _inspect_motor_data(raw: dict[str, Any]) -> None:
+    """打印各轨迹尺度，并提示 qv/qa 不一致或 τ 异常（会导致 loss↓ 但 RMSE↑）。"""
+    labels = raw["labels"]
+    print(f"文件轨迹: {labels}")
+    for i, lab in enumerate(labels):
+        qv = np.asarray(raw["qv"][i]).ravel()
+        qa = np.asarray(raw["qa"][i]).ravel()
+        tau = np.asarray(raw["tau"][i]).ravel()
+        t = np.asarray(raw["t"][i]).ravel()
+        dt = float(np.diff(t).mean()) if len(t) > 1 else 1.0
+        qa_grad = np.gradient(qv, dt)
+        tau_rms = float(np.sqrt(np.mean(tau**2)))
+        print(
+            f"  [{lab}] T={len(qv)}  |qv|max={np.max(np.abs(qv)):.4g}  "
+            f"|qa|max={np.max(np.abs(qa)):.4g}  |d(qv)/dt|max={np.max(np.abs(qa_grad)):.4g}  "
+            f"τ_rms={tau_rms:.4g}"
+        )
+        if np.max(np.abs(qv)) > 50 and np.max(np.abs(qa)) < 50:
+            print(
+                f"    警告: |qv| 很大但 |qa| 很小，qv 与 qa 可能不同源/单位（训练集常见则 RMSE 不可信）"
+            )
+        if np.max(np.abs(qa_grad)) > 0 and np.max(np.abs(qa)) > 0:
+            ratio = np.max(np.abs(qa)) / max(np.max(np.abs(qa_grad)), 1e-12)
+            if ratio < 0.2 or ratio > 5.0:
+                print(
+                    f"    警告: max|qa| 与 max|d(qv)/dt| 相差 {ratio:.2g} 倍，建议检查导入或重算 qa"
+                )
+        if tau_rms > 50 or np.max(np.abs(tau)) > 100:
+            print(f"    警告: τ 存在大幅尖刺，SMAPE 损失仍可能很小但 MSE/RMSE 会失真")
+
+
 def _assert_single_dof(raw: dict[str, Any]) -> int:
     n_dof, _ = validate_pickle_raw(raw)
     if n_dof != 1:
@@ -103,12 +134,16 @@ def _motor_dynamics_report(
     H = model.lnet.H_hat_from_q(q)
     j = H[:, 0, 0].cpu().numpy()
 
-    z_qd = torch.zeros_like(qd)
-    z_qdd = torch.zeros_like(qdd)
-    g_vec = model.lnet.inv_dyn(q, z_qd, z_qdd)
-    c_vec = model.lnet.inv_dyn(q, qd, z_qdd) - g_vec
-    c_rms = float(torch.sqrt(torch.mean(c_vec**2)).cpu())
-    g_rms = float(torch.sqrt(torch.mean(g_vec**2)).cpu())
+    if getattr(model.lnet, "zero_cg", False):
+        c_rms = 0.0
+        g_rms = 0.0
+    else:
+        z_qd = torch.zeros_like(qd)
+        z_qdd = torch.zeros_like(qdd)
+        g_vec = model.lnet.inv_dyn(q, z_qd, z_qdd)
+        c_vec = model.lnet.inv_dyn(q, qd, z_qdd) - g_vec
+        c_rms = float(torch.sqrt(torch.mean(c_vec**2)).cpu())
+        g_rms = float(torch.sqrt(torch.mean(g_vec**2)).cpu())
 
     tau_hat, tau_core, tau_fri, _, _, _ = model(q, qd, qdd, qs, qds)
     tau_rmse = float(torch.sqrt(torch.mean((tau_hat - tt) ** 2)).cpu())
@@ -146,7 +181,7 @@ def _print_report(rep: MotorIdentifyReport, *, known_j: float | None) -> None:
         err = abs(rep.j_median - known_j) / known_j * 100.0
         print(f"  参考 J (--known-J):       {known_j:.6e}  相对误差 {err:.2f}%")
     print(f"  残余 c RMS:               {rep.c_rms:.6e} N·m  (理想≈0)")
-    print(f"  残余 g RMS:               {rep.g_rms:.6e} N·m  (理想≈0)")
+    print(f"  残余 g RMS:               {rep.g_rms:.6e} N·m  (理想≈0；默认训练已置零 c,g)")
     print(f"  RMSE τ_total:             {rep.tau_rmse:.6e} N·m")
     print(f"  RMSE τ_rigid (仅刚体):    {rep.tau_rigid_rmse:.6e} N·m")
     print(f"  RMSE |τ_fri|:             {rep.tau_fri_rmse:.6e} N·m")
@@ -183,6 +218,7 @@ def _checkpoint_payload(
         "fo_mlp_hidden_layers": args.fo_mlp_hidden_layers,
         "mass_diag_eps": args.lnet_mass_eps,
         "lnet_numerical_H_ridge": args.lnet_mass_eps,
+        "lnet_zero_cg": not args.no_zero_cg,
     }
     if report is not None:
         payload["J_est"] = report.j_median
@@ -247,7 +283,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seq-len", type=int, default=20)
     p.add_argument("--epochs", type=int, default=800)
     p.add_argument("--batch", type=int, default=256)
-    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument(
         "--lnet-width",
         type=int,
@@ -262,6 +298,11 @@ def _parse_args() -> argparse.Namespace:
         metavar="EPS",
         help="L-Net 质量对角初值 b 与 H 数值脊 εI（默认 1e-2；"
         "J 卡在 0.01 时可试 1e-4~1e-3，需与真实 J 量级匹配）",
+    )
+    p.add_argument(
+        "--no-zero-cg",
+        action="store_true",
+        help="不强制 c=g=0（默认单电机水平轴：刚体项仅 H·q̈）",
     )
     p.add_argument("--fo-mlp-hidden-layers", type=int, default=2)
     p.add_argument("--lambda-physics", type=float, default=0.5)
@@ -288,11 +329,9 @@ def main() -> None:
     _assert_single_dof(raw)
 
     if args.inspect:
-        labels = raw["labels"]
-        T0 = int(np.asarray(raw["qp"][0]).shape[0])
         print(f"文件: {args.data}")
-        print(f"  轨迹数: {len(labels)}  标签: {labels}")
-        print(f"  n_dof=1  首条长度 T={T0}")
+        print(f"  n_dof=1")
+        _inspect_motor_data(raw)
         return
 
     cleanup_temp = False
@@ -322,6 +361,8 @@ def main() -> None:
     qp, qv, qa, tau, _tau_rigid, tau_fri = stack_trajectories_to_flat(
         raw, train_labels=train_label_set
     )
+    print(f"训练轨迹: {train_labels}  测试轨迹: {list(_test_labels_out)}")
+    _inspect_motor_data(raw)
 
     cuda = bool(args.c) and torch.cuda.is_available()
     device = torch.device("cuda" if cuda else "cpu")
@@ -341,6 +382,7 @@ def main() -> None:
     mass_eps = float(args.lnet_mass_eps)
     if mass_eps <= 0:
         raise SystemExit(f"--lnet-mass-eps 须为正数，当前 {mass_eps}")
+    zero_cg = not args.no_zero_cg
     model = MystericNet(
         dof=1,
         seq_len=args.seq_len,
@@ -350,6 +392,7 @@ def main() -> None:
         fo_mlp_hidden_layers=args.fo_mlp_hidden_layers,
         mass_diag_eps=mass_eps,
         lnet_numerical_H_ridge=mass_eps,
+        lnet_zero_cg=zero_cg,
     ).to(device)
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5, amsgrad=True)
@@ -360,7 +403,8 @@ def main() -> None:
     print(
         "单电机辨识训练  model=DeLaN+fo_cascade_pinn  supervise_τ_fri=False\n"
         f"  device={device}  train_N={N}  test_N={test_qp.shape[0]}  "
-        f"λ_phys={args.lambda_physics}  w_fri={w_fri}  lnet_mass_eps={mass_eps:.2e}\n"
+        f"λ_phys={args.lambda_physics}  w_fri={w_fri}  lnet_mass_eps={mass_eps:.2e}  "
+        f"zero_cg={zero_cg} (τ_rigid=H·q̈)\n"
         f"  提示: 激励需覆盖足够 |q̈| 与 |q̇|；J_med 若恒等于 mass_eps 可再减小 --lnet-mass-eps。"
     )
 
@@ -415,22 +459,33 @@ def main() -> None:
                 steps += 1
 
             if epoch == 1 or epoch % 50 == 0 or epoch == args.epochs:
-                n_test = min(512, test_qp.shape[0])
-                rep = _motor_dynamics_report(
+                n_eval = min(512, test_qp.shape[0], qp.shape[0])
+                rep_test = _motor_dynamics_report(
                     model,
-                    test_qp[:n_test],
-                    test_qv[:n_test],
-                    test_qa[:n_test],
-                    test_tau[:n_test],
+                    test_qp[:n_eval],
+                    test_qv[:n_eval],
+                    test_qa[:n_eval],
+                    test_tau[:n_eval],
                     args.seq_len,
                     device,
                 )
-                last_report = rep
+                rep_train = _motor_dynamics_report(
+                    model,
+                    qp[:n_eval],
+                    qv[:n_eval],
+                    qa[:n_eval],
+                    tau[:n_eval],
+                    args.seq_len,
+                    device,
+                )
+                last_report = rep_test
                 n_s = max(steps, 1)
                 print(
                     f"epoch {epoch:4d}  loss={loss_acc/n_s:.5f}  l_tau={ltau_acc/n_s:.4f}  "
-                    f"l_fri={lf_acc/n_s:.4f}  RMSE_τ={rep.tau_rmse:.4f}  "
-                    f"J_med={rep.j_median:.6e}  c_rms={rep.c_rms:.4f}  g_rms={rep.g_rms:.4f}  "
+                    f"l_fri={lf_acc/n_s:.4f}  "
+                    f"RMSE_τ_test={rep_test.tau_rmse:.4f}  RMSE_τ_train={rep_train.tau_rmse:.4g}  "
+                    f"RMSE_rigid_test={rep_test.tau_rigid_rmse:.4f}  "
+                    f"J_med={rep_test.j_median:.6e}  "
                     f"t={time.perf_counter()-t0:.2f}s"
                 )
 

@@ -91,6 +91,14 @@ def load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[Mysteric
         kw["fo_mlp_hidden_layers"] = int(
             ckpt.get("fo_mlp_hidden_layers", _infer_fo_mlp_blocks(state))
         )
+    if "mass_diag_eps" in ckpt:
+        eps = float(ckpt["mass_diag_eps"])
+        kw["mass_diag_eps"] = eps
+        kw["lnet_numerical_H_ridge"] = float(
+            ckpt.get("lnet_numerical_H_ridge", eps)
+        )
+    if ckpt.get("motor_identify"):
+        kw["lnet_zero_cg"] = bool(ckpt.get("lnet_zero_cg", True))
     model = MystericNet(**kw).to(device)
     model.load_state_dict(state)
     model.eval()

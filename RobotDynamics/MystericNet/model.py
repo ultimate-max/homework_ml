@@ -45,6 +45,7 @@ class MystericNet(nn.Module):
         stribeck_dropout: float = 0.0,
         scv_variant: Literal["scv", "cv"] = "scv",
         fo_mlp_hidden_layers: int = 6,
+        lnet_zero_cg: bool = False,
     ) -> None:
         super().__init__()
         self.dof = dof
@@ -56,6 +57,7 @@ class MystericNet(nn.Module):
             num_hidden_layers=lnet_layers,
             b_diagonal=mass_diag_eps,
             numerical_H_ridge=lnet_numerical_H_ridge,
+            zero_coriolis_gravity=lnet_zero_cg,
         )
         if friction_backend == "tcn":
             self.hnet = HNetTCN(

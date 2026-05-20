@@ -90,11 +90,13 @@ class LNet(nn.Module):
         numerical_H_ridge: float = 1.0e-2,
         b_init: float = 1.0e-3,
         activation: str = "SoftPlus",
+        zero_coriolis_gravity: bool = False,
     ) -> None:
         # super().__init__() 必须调用，才能正确注册下面的层和参数
         super().__init__()
 
         self.n_dof = dof
+        self.zero_cg = bool(zero_coriolis_gravity)
         self.b_diagonal = b_diagonal          # L 对角偏置初值（论文里的 b）
         self.diagonal_epsilon = numerical_H_ridge  # 加到 H 上的小量 εI，数值更稳
 
@@ -229,7 +231,12 @@ class LNet(nn.Module):
 
         # ---- Step 5: 逆动力学力矩 tau = H@qdd + c + g ----
         H_qdd = torch.matmul(H, qdd.view(B, n_dof, 1)).view(B, n_dof)
-        tau = H_qdd + c + g
+        if self.zero_cg:
+            c = torch.zeros_like(c)
+            g = torch.zeros_like(g)
+            tau = H_qdd
+        else:
+            tau = H_qdd + c + g
 
         # ---- Step 6: 能量（用于损失函数或调试）----
         H_qd = torch.matmul(H, qd_3d).view(B, n_dof)
@@ -238,7 +245,10 @@ class LNet(nn.Module):
         qd_H_qdd = torch.matmul(qd_4d.transpose(2, 3), H_qdd.view(B, 1, n_dof, 1)).view(B)
         qd_Hdt_qd = torch.matmul(qd_4d.transpose(2, 3), Hdt_qd.view(B, 1, n_dof, 1)).view(B)
         dTdt = qd_H_qdd + 0.5 * qd_Hdt_qd
-        dVdt = torch.matmul(qd_4d.transpose(2, 3), g.view(B, 1, n_dof, 1)).view(B)
+        if self.zero_cg:
+            dVdt = torch.zeros_like(dTdt)
+        else:
+            dVdt = torch.matmul(qd_4d.transpose(2, 3), g.view(B, 1, n_dof, 1)).view(B)
 
         return RigidBodyDynamics(tau=tau, H=H, c=c, g=g, T=T, V=V, dTdt=dTdt, dVdt=dVdt, L=L)
 

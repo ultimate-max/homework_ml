@@ -387,8 +387,8 @@ $$
 ```bash
 python examples/robot_evaluate.py \
   --checkpoint checkpoints/motor_identify.pt \
-  --data data/motor.pickle \
-  --test-frac 0.2 \
+  --data data/motor_data.pickle   \
+  --test-label e q v \
   --figure-out figures/motor_friction.png
 ```
 
