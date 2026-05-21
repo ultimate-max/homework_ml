@@ -195,7 +195,35 @@ python scripts/import_delan_data.py \
 
 实现见 `RobotDynamics/DeLaN/signal_filter.py`。单轴 `.mat` 中 `qp` 等为 `(T,)` 一维向量时，导入脚本会自动 reshape 为 `(T, 1)`（见 `mat_convert.py`）。
 
-### 2.4 训练前检查数据
+### 2.4 导入后数据检查图（默认开启）
+
+`import_delan_data.py` 写入 pickle 后，会按 **每条轨迹标签** 生成检查图（`RobotDynamics/DeLaN/import_plot.py`）：
+
+| 输出 | 内容 |
+|------|------|
+| `figures/.../import_<label>.png` | 各标签一张：**n_dof=1** 为单列时间序列；**n_dof>1**（如 6 轴 `robot_fric`）为 **行×关节列** 网格，每关节对比 `qa` 与 `d(qv)/dt` |
+| `figures/.../import_all_tau.png` | 总览：单轴为各标签 `tau` 拼接；多轴为 **每关节一张** `\|tau\|` |
+| 终端统计 | 每条轨迹、**每个关节** 的 `\|qv\|max`、`\|qa\|max`、qa/梯度之比 |
+
+多轴可只画部分关节：`--plot-joints 0 1 2`（默认画全部）。
+
+```bash
+python scripts/import_delan_data.py \
+  -i data/motor_character_data.mat \
+  -o data/motor_data.pickle \
+  --filter-cutoff 40 \
+  --figure-dir figures/motor_import_check
+
+# 不绘图：加 --no-plot
+# 仅检查已有 pickle：--inspect data/motor_data.pickle --plot
+# 6 轴机械臂（mat 损坏时可直接 inspect pickle）：
+python scripts/import_delan_data.py --inspect data/robot_fric.pickle --plot \
+  --figure-dir figures/robot_import_check
+```
+
+看图时重点确认：**换向处 `qa` 与 `d(qv)/dt` 是否同量级**（应接近 1）；`tau` 尖峰处 `qa` 是否也有峰（否则 L-Net 学不到惯量项）。
+
+### 2.5 训练前检查数据
 
 ```bash
 python examples/delan_train.py --inspect --data data/robot.pickle
@@ -337,7 +365,7 @@ $$
 python scripts/import_delan_data.py \
   -i data/motor_character_data.mat \
   -o data/motor_data.pickle
-# 不需要滤波时加 --no-filter；改截止频率用 --filter-cutoff（见 §2.3）
+# 不需要滤波时加 --no-filter；改截止频率用 --filter-cutoff（见 §2.3）；检查图见 §2.4
 
 # 检查 n_dof=1
 python examples/motor_identify_train.py --data data/motor.pickle --inspect
@@ -345,29 +373,77 @@ python examples/motor_identify_train.py --data data/motor.pickle --inspect
 
 **激励**：轨迹应覆盖足够大的 $|\ddot q|$ 与 $|\dot q|$（正反转、加减速、扫频等），否则 $J$ 与摩擦难以分离。
 
-#### 训练
+#### 训练（单阶段）
+
+联合训练 L-Net（$J$）与 `fo_cascade_pinn`（摩擦）。单轴默认刚体项为 $\tau_{\text{rigid}} = H\ddot q$（`c=g=0`，见脚本内 `zero_cg`）。
 
 ```bash
 conda activate frictionest
 cd /path/to/DeLaN_Stribeck
 
 python examples/motor_identify_train.py \
-  --data data/motor.pickle \
-  --known-J 0.0023 \
-  --test-frac 0.2 \
+  --data data/motor_data.pickle \
+  --known-J 0.243 \
+  --test-labels e v q \
   --epochs 800 \
   -m 1
 ```
 
+#### 两阶段训练（推荐：先摩擦、再惯量）
+
+单阶段长训时，摩擦与惯量**共用** $l_\tau$，梯度常互相牵制：摩擦曲线尚可，但 **$J$ 偏离台架值**（如 `--known-J 0.243` 即 `24.3e-2` kg·m²）。  
+`motor_identify_train.py` 支持：
+
+| 阶段 | 轮数 | 可训练模块 | 损失 | 日志标记 |
+|------|------|------------|------|----------|
+| **1** | `--stage1-epochs` | L-Net + hnet（fo + SCV） | $l_\tau + w_{\text{fri}}\,l_{\text{fri}}$ | `[S1]` |
+| **2** | `--stage2-epochs` | **仅 L-Net**（**冻结 hnet**） | $l_\tau + w_{\text{inertia}}\,l_{\text{inertia}}$（$\hat\tau_{\text{core}}$ 拟合 $\tau-\hat\tau_{\text{fri}}$） | `[S2-J]` |
+
+- 设 `--stage2-epochs 0`（默认）则等价于只用 `--epochs` 的单阶段训练。  
+- 未指定 `--stage1-epochs` 时，阶段 1 轮数 = `epochs − stage2`（例如总 2000、阶段 2 为 800 → 阶段 1 为 1200）。  
+- 进入阶段 2 时终端会打印「已冻结 hnet」，并可用更小的 `--stage2-lr`（默认与 `--lr` 相同，常取 `1e-4`）。
+
+**示例（总 2000 epoch：1200 + 800）**：
+
+```bash
+python examples/motor_identify_train.py \
+  --data data/motor_data.pickle \
+  --known-J 0.243 \
+  --test-labels e v q \
+  --stage1-epochs 1200 \
+  --stage2-epochs 800 \
+  --stage2-lr 1e-4 \
+  --lnet-mass-eps 1e-3 \
+  -m 1
+```
+
+**调参提示**：
+
+- 阶段 1 结束先看 `figures/motor_friction.png`（§下方评估），确认摩擦形状合理再依赖阶段 2 的 $J$。  
+- 日志里 **`J_med` 长期等于 `--lnet-mass-eps`**：多半不是“没训练”，而是 $L\approx 0$、$H\approx\varepsilon I$（`net_ld` 经 ReLU 后输出≈0）。请配合 **`--known-J`**（自动把 `net_ld.bias` 初化为 $\sqrt{J-\varepsilon}$）、看 **`J_learn`/`L_med`**（$J_{\text{learn}}\approx H_{00}-\varepsilon$），并保证 $\varepsilon\ll J$（如 `1e-4`，勿把 `1e-3` 当成目标惯量）。  
+- 阶段 2 默认 **`--stage2-w-inertia 1`**，显式让 $\hat\tau_{\text{core}}=H\ddot q$ 去拟合尖峰惯量项；仅用总力矩 $l_\tau$ 时摩擦已冻结，平台段梯度很弱。  
+- 数据需有足够 **$|\ddot q|$** 激励，否则阶段 2 仍难以辨识惯量。
+
+#### 常用参数
+
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `--data` | `data/motor.pickle` | `.pickle` 或 `.npz` |
-| `--known-J` | 无 | 已知惯量 (kg·m²)，仅用于打印相对误差 |
-| `--test-frac` | `0.2` | 无匹配 `--test-labels` 时，最后 20% 轨迹作测试 |
-| `--test-labels` | `e v q` | 与机械臂相同；电机数据可改自定义标签 |
-| `--epochs` | `800` | 单轴常惯量可适当加大 |
-| `--lnet-width` / `--lnet-depth` | `32` / `2` | 小于多轴默认，减轻 $H(q)$ 过拟合 |
-| `--lambda-physics` | `0.5` | PINN 摩擦 SCV 项权重 |
+| `--known-J` | 无 | 已知惯量 (kg·m²)；默认初始化 `net_ld.bias`（`--no-lnet-j-init` 关闭） |
+| `--stage2-w-inertia` | `1` | 阶段 2 惯量项 $l_{\text{inertia}}$ 权重；`0`=仅 $l_\tau$ |
+| `--test-frac` | `0.2` | 无匹配 `--test-labels` 时，最后 20% **轨迹**作测试 |
+| `--test-labels` | `e v q` | 测试集轨迹标签 |
+| `--epochs` | `800` | 单阶段总 epoch；两阶段时作 stage1 默认上限 |
+| `--stage1-epochs` | 无 | 阶段 1 epoch；与 `--stage2-epochs` 联用 |
+| `--stage2-epochs` | `0` | 阶段 2 epoch；`0`=关闭两阶段 |
+| `--stage2-lr` | 同 `--lr` | 阶段 2 学习率（默认 `5e-4`） |
+| `--lr` | `5e-4` | 阶段 1 学习率 |
+| `--seq-len` | `20` | 摩擦网络滑窗长度 |
+| `--fo-mlp-hidden-layers` | `2` | fo_cascade ResMLP 残差块数 |
+| `--lnet-width` / `--lnet-depth` | `32` / `2` | L-Net 规模 |
+| `--lnet-mass-eps` | `1e-2` | $H$ 对角初值/数值脊 |
+| `--lambda-physics` | `0.5` | PINN 摩擦物理项权重 $\lambda$ |
+| `--friction-loss-weight` | `1.0` | $w_{\text{fri}}$ |
 | `-m 1` | 关 | 保存 `checkpoints/motor_identify.pt` |
 | `--save` | `checkpoints/motor_identify.pt` | 自定义路径 |
 
@@ -378,25 +454,32 @@ $$
 l_{\text{fri}} = \lambda\,\text{loss}(\hat\tau_{\text{fri}},\,\tau_{\text{fri,physics}})
 $$
 
-无 $\tau_{\text{fri}}$ 真值时仅 PINN 物理项 + 总力矩 $l_\tau$。训练中每 50 epoch 打印 `J_med`、`c_rms`、`g_rms`；结束后输出完整辨识表（$J$ 取 $H_{00}$ 中位数、SCV 参数等）。checkpoint 含字段 `motor_identify`、`J_est`。
+无 $\tau_{\text{fri}}$ 真值时仅 PINN 物理项 + 总力矩 $l_\tau$。阶段 2 另加 $l_{\text{inertia}}=\text{loss}(\hat\tau_{\text{core}},\,\tau-\hat\tau_{\text{fri}})$（摩擦分支已冻结）。训练中每 50 epoch 打印 `J_med`、`J_learn`、`L_med`、`RMSE_τ` 等；结束后输出辨识表（$H_{00}$ 及 $H_{00}-\varepsilon$、SCV 参数）。checkpoint 含 `motor_identify`、`J_est`、`stage1_epochs`、`stage2_epochs`。
 
 #### 评估
 
-与 Mysteric 相同，用 `robot_evaluate.py` 画 $\tau_{\text{fri}}$ 与总力矩曲线：
+训练结束后用 `robot_evaluate.py` 查看摩擦与总力矩（需与训练时 `--fo-mlp-hidden-layers` 一致，脚本会从 checkpoint 自动读取）：
 
 ```bash
 python examples/robot_evaluate.py \
   --checkpoint checkpoints/motor_identify.pt \
-  --data data/motor_data.pickle   \
-  --test-label e q v \
+  --data data/motor_data.pickle \
+  --test-labels e v q \
   --figure-out figures/motor_friction.png
 ```
 
-终端会打印学到的 **SCV 参数**；惯量以训练结束时的 **`J_est` / `J_med`** 为准（非 SCV 参数）。
+| 看什么 | 说明 |
+|--------|------|
+| 终端 **辨识表** | `J` 与 `--known-J` 相对误差、`c_rms`/`g_rms`（应小）、`RMSE τ_total` |
+| `motor_friction.png` | 预测 $\tau_{\text{fri}}$、SCV 物理支路、$\tau_{\text{hat}}$ vs 测量 |
+| checkpoint **`J_est`** | 与表中 $H_{00}$ 中位数一致 |
+
+仅评估刚体（不看摩擦网络）时可用 `delan_evaluate.py` + 同一 checkpoint（只加载 L-Net）。
 
 #### 注意
 
 - 辨识的是**数据上的等效惯量**（含减速器反射惯量等），不是 datasheet 裸转子 $J$ 的唯一值。
+- **$J$ 不准、摩擦尚可**时优先试 **§两阶段训练**，并检查 `--lnet-mass-eps` 与激励是否含足够加速度。
 - `m/c/g` 全零的 pickle **不能**用于监督 $\tau_{\text{fri}}$；本脚本已固定 `supervise_friction=False`。
 - 多轴电机请用 §3.2 `robot_train.py`，不要用本脚本。
 

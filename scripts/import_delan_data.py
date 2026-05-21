@@ -16,8 +16,21 @@
   # 单条 npz: 键 qp, qv, qa, tau [, t, m, c, g]
   python scripts/import_delan_data.py -i traj.npz -o data/robot.pickle
 
+  # 导入 + 按标签绘图检查（默认开启，可用 --no-plot 关闭）
+  # 单电机 (n_dof=1)
+  python scripts/import_delan_data.py \
+    -i data/motor_character_data.mat \
+    -o data/motor_data.pickle \
+    --filter-cutoff 40 \
+    --figure-dir figures/motor_import_check
+
+  # 6 轴机械臂：按关节分列检查图
+  python scripts/import_delan_data.py --inspect data/robot_fric.pickle --plot \
+    --figure-dir figures/robot_import_check
+
   # 查看已有 pickle
   python scripts/import_delan_data.py --inspect data/robot.pickle
+  python scripts/import_delan_data.py --inspect data/robot.pickle --plot --figure-dir figures/check
 """
 
 from __future__ import annotations
@@ -38,6 +51,7 @@ from RobotDynamics.DeLaN import (
     save_pickle,
     suggest_hyper,
 )
+from RobotDynamics.DeLaN.import_plot import plot_character_data
 from RobotDynamics.DeLaN.signal_filter import (
     filter_character_data,
     read_mat_scalar_dt,
@@ -89,6 +103,41 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="要滤波的字段，默认 qp qv qa tau p pdot",
     )
+    p.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="导入后不生成按标签检查图（默认会绘图）",
+    )
+    p.add_argument(
+        "--plot",
+        action="store_true",
+        help="与 --inspect 联用时，对已存在 pickle 也绘图",
+    )
+    p.add_argument(
+        "--figure-dir",
+        type=Path,
+        default=ROOT / "figures" / "import_check",
+        help="检查图输出目录，每张图 import_<label>.png",
+    )
+    p.add_argument(
+        "--plot-max-points",
+        type=int,
+        default=12000,
+        help="每条轨迹绘图最大点数（过长则降采样）",
+    )
+    p.add_argument(
+        "--plot-show",
+        action="store_true",
+        help="弹窗显示 matplotlib 图（默认只保存文件）",
+    )
+    p.add_argument(
+        "--plot-joints",
+        nargs="+",
+        type=int,
+        default=None,
+        metavar="J",
+        help="多轴时只画指定关节下标（默认全部）；例：--plot-joints 0 2 4",
+    )
     return p.parse_args()
 
 
@@ -97,6 +146,18 @@ def main() -> int:
 
     if args.inspect:
         print(inspect_dataset(args.inspect))
+        if args.plot:
+            import dill as pickle
+
+            with open(args.inspect, "rb") as f:
+                pdata = pickle.load(f)
+            plot_character_data(
+                pdata,
+                args.figure_dir,
+                max_points=args.plot_max_points,
+                show=args.plot_show,
+                joint_indices=args.plot_joints,
+            )
         return 0
 
     if args.input is None or args.output is None:
@@ -138,6 +199,20 @@ def main() -> int:
     save_pickle(data, args.output)
     print(f"已写入 {args.output}")
     print(inspect_pickle_dict(data))
+
+    dt_hint = args.dt_hint
+    if dt_hint is None and suf == ".mat":
+        dt_hint = read_mat_scalar_dt(args.input, root=args.root)
+
+    if not args.no_plot:
+        plot_character_data(
+            data,
+            args.figure_dir,
+            max_points=args.plot_max_points,
+            show=args.plot_show,
+            dt_hint=dt_hint,
+            joint_indices=args.plot_joints,
+        )
 
     if args.suggest_hyper:
         n_dof = int(data["qp"][0].shape[1])
