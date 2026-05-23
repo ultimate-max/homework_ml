@@ -44,17 +44,16 @@ def _infer_lnet_hyper(state: dict) -> tuple[int, int]:
     return n_width, n_depth
 
 
-def _infer_fo_mlp_blocks(state: dict) -> int:
-    """从 fo_cascade ResMLP 的 blocks.* 推断残差块个数。"""
-    block_ids: list[int] = []
-    for k in state:
-        if k.startswith("hnet.fo.stribeck_mlp.blocks.") and ".fc1.weight" in k:
-            parts = k.split(".")
-            try:
-                block_ids.append(int(parts[3]))
-            except (IndexError, ValueError):
-                continue
-    return max(block_ids) + 1 if block_ids else 6
+def _infer_fo_mlp_hidden_dim(state: dict, dof: int) -> int | None:
+    """从 fo_cascade 两层 MLP 或旧版 ResMLP 推断隐层宽度。"""
+    for key in (
+        "hnet.fo.stribeck_mlp.net.0.weight",
+        "hnet.fo.stribeck_mlp.in_proj.weight",
+    ):
+        w = state.get(key)
+        if w is not None:
+            return int(w.shape[0])
+    return None
 
 
 def _infer_pinn_hidden(state: dict, dof: int) -> tuple[int, ...]:
@@ -88,9 +87,13 @@ def load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[Mysteric
     if backend == "stribeck_pinn":
         kw["stribeck_hidden"] = _infer_pinn_hidden(state, dof)
     elif backend in ("fo_cascade", "fo_cascade_pinn"):
-        kw["fo_mlp_hidden_layers"] = int(
-            ckpt.get("fo_mlp_hidden_layers", _infer_fo_mlp_blocks(state))
-        )
+        hid = ckpt.get("fo_mlp_hidden_dim", ckpt.get("fo_mlp_hidden_layers"))
+        if hid is not None:
+            kw["fo_mlp_hidden_dim"] = int(hid)
+        else:
+            inferred = _infer_fo_mlp_hidden_dim(state, dof)
+            if inferred is not None:
+                kw["fo_mlp_hidden_dim"] = inferred
     if "mass_diag_eps" in ckpt:
         eps = float(ckpt["mass_diag_eps"])
         kw["mass_diag_eps"] = eps

@@ -239,7 +239,7 @@ def _checkpoint_payload(
         "fri_loss": args.fri_loss,
         "smape_eps": args.smape_eps,
         "data_path": str(args.data.resolve()),
-        "fo_mlp_hidden_layers": args.fo_mlp_hidden_layers,
+        "fo_mlp_hidden_dim": args.fo_mlp_hidden,
         "mass_diag_eps": args.lnet_mass_eps,
         "lnet_numerical_H_ridge": args.lnet_mass_eps,
         "lnet_zero_cg": not args.no_zero_cg,
@@ -268,6 +268,7 @@ def _set_module_trainable(module: torch.nn.Module, trainable: bool) -> None:
 def _freeze_friction_branch(model: MystericNet) -> int:
     """冻结 hnet（fo + SCV），仅保留 L-Net 可训练。返回冻结参数量。"""
     _set_module_trainable(model.hnet, False)
+    _set_module_trainable(model.lnet, True)
     model.hnet.eval()
     model.lnet.train()
     return sum(p.numel() for p in model.hnet.parameters())
@@ -408,7 +409,13 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="不强制 c=g=0（默认单电机水平轴：刚体项仅 H·q̈）",
     )
-    p.add_argument("--fo-mlp-hidden-layers", type=int, default=4)
+    p.add_argument(
+        "--fo-mlp-hidden",
+        type=int,
+        default=None,
+        metavar="D",
+        help="fo_cascade 两层 MLP 隐层宽度，默认 max(4*n_dof, 16)",
+    )
     p.add_argument("--lambda-physics", type=float, default=0.5)
     p.add_argument("--friction-loss-weight", type=float, default=1.0)
     p.add_argument("--tau-loss", choices=("mse", "smape"), default="smape")
@@ -493,7 +500,7 @@ def main() -> None:
         lnet_hidden=l_w,
         lnet_layers=l_d,
         friction_backend=FRICTION_BACKEND,
-        fo_mlp_hidden_layers=args.fo_mlp_hidden_layers,
+        fo_mlp_hidden_dim=args.fo_mlp_hidden,
         mass_diag_eps=mass_eps,
         lnet_numerical_H_ridge=mass_eps,
         lnet_zero_cg=zero_cg,

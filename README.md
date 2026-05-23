@@ -298,7 +298,7 @@ python examples/robot_train.py \
 | `--friction-backend` | 说明 |
 |----------------------|------|
 | `tcn` | 时序卷积（原 Mysteric-Net 论文） |
-| `fo_cascade` | TCN₁([q,q̇])→MLP→**1/s**→TCN₂，对齐 Xun 分数阶摩擦图 4（MLP 后因果积分低通） |
+| `fo_cascade` | TCN₁([q,q̇])→**两层 tanh MLP**→TCN₂，对齐 Xun 图 4 简化版 |
 | `fo_cascade_pinn` | fo_cascade + SCV，`friction_pinn_loss`（Hu 等 PINN，$\lambda$=`--lambda-physics`） |
 | `stribeck` | 可学习 Stribeck-Coulomb-Viscous 物理模型 |
 | `stribeck_pinn` | MLP + SCV 物理损失（Hu 等 PINN） |
@@ -315,7 +315,7 @@ $$
 | $l_\tau$ | 始终 | `--tau-loss smape`（默认）或 `mse` |
 | $l_{\text{fri}}$ | 有 `m/c/g` 或 PINN 后端 | **`--fri-loss smape`（默认）** 或 `mse`；与 $l_\tau$ 相同 SMAPE 公式，利于小力矩关节。PINN：数据项 + SCV 项均用 `fri_loss` |
 | $w_{\text{fri}}$ | `--friction-loss-weight` | SMAPE 摩擦下默认 **1.0**；仅当 `fri-loss mse` 且 $l_{\text{fri}}$ 很大时用 **0.01~0.1** |
-| $l_E$ | **仅**加 `--energy-loss` | Yeo 等 Eq. (7) 刚体能量率一致性，实现于 `RobotDynamics/FrictionModule/energy_loss.py` |
+| $l_E$ | 阶段 2 默认；或 `--energy-loss` | Yeo Eq. (7)；`RobotDynamics/FrictionModule/energy_loss.py` |
 
 能量项（可选）：
 
@@ -323,7 +323,7 @@ $$
 l_E = \mathbb{E}\left[\left(\frac{\mathrm{d}T}{\mathrm{d}t}+\frac{\mathrm{d}V}{\mathrm{d}t} - (\tau-\hat\tau_{\text{fri}})^\top \dot q\right)^2\right]
 $$
 
-其中 $\mathrm{d}T/\mathrm{d}t+\mathrm{d}V/\mathrm{d}t$ 由 **L-Net** 的 `dynamics()` 给出；$(\tau-\hat\tau_{\text{fri}})^\top\dot q$ 把摩擦从总力矩中剥离后的功率残差。开启 `--energy-loss` 时训练更慢（需 L-Net 能量率前向），合成数据上同样可用：
+其中 $\mathrm{d}T/\mathrm{d}t+\mathrm{d}V/\mathrm{d}t$ 由 **L-Net** 的 `dynamics()` 给出；$(\tau-\hat\tau_{\text{fri}})^\top\dot q$ 把摩擦从总力矩中剥离后的功率。**阶段 2 默认启用 $l_E$**（摩擦已冻结，最适合约束 L-Net 不学摩擦）；阶段 1 需显式加 `--energy-loss`。
 
 ```bash
 python examples/robot_train.py \
@@ -338,6 +338,38 @@ python examples/synthetic_train.py --data data/synthetic_2dof_inverse.npz --ener
 ```
 
 默认保存：`checkpoints/mysteric_robot.pt`（需 `-m 1`）。**Ctrl+C 中断训练**时会自动保存当前权重：若已加 `-m 1` 则写入 `--save` 路径，否则写入 `checkpoints/mysteric_robot_interrupt.pt`（checkpoint 中含 `epoch`、`interrupted` 字段）。
+
+#### 三阶段训练（推荐：联合 → 仅 L-Net → 仅摩擦）
+
+`robot_fric.pickle` 等多轴数据上，可先 **联合训练**，再 **冻结摩擦专训 L-Net**，最后 **冻结 L-Net 微调摩擦**。
+
+| 阶段 | 轮数 | 可训练 | 损失 | 日志 |
+|------|------|--------|------|------|
+| **1** | `--stage1-epochs` | L-Net + hnet | $l_\tau + w_{\text{fri}}\,l_{\text{fri}}$（可选 `--energy-loss`） | `[S1]` |
+| **2** | `--stage2-epochs` | **仅 L-Net**（hnet 冻结） | $l_\tau$ **+ 默认 $l_E$**（可用 `--no-stage2-energy` 关闭） | `[S2-L]` |
+| **3** | `--stage3-epochs` | **仅 hnet**（L-Net 冻结） | 仅 $w_{\text{fri}}\,l_{\text{fri}}$ | `[S3-F]` |
+
+- `--stage2-epochs 0`（默认）= 单阶段联合训练。  
+- `--stage3-epochs` 须与 `--stage2-epochs>0` 联用。  
+- 未指定 `--stage1-epochs` 时，阶段 1 = `epochs − stage2 − stage3`。
+
+```bash
+python examples/robot_train.py \
+  --data data/robot_fric.pickle \
+  --friction-backend fo_cascade_pinn \
+  --lambda-physics 0.5 \
+  --fo-mlp-hidden 24 \
+  --stage1-epochs 2000 \
+  --stage2-epochs 2000 \
+  --stage3-epochs 1000 \
+  --stage1-lr 1e-3 \
+  --stage2-lr 5e-4 \
+  --stage3-lr 1e-3 \
+  --test-labels e v q \
+  -m 1
+```
+
+阶段 2 结束可用 `robot_evaluate.py` 看刚体项；阶段 3 在 L-Net 固定后进一步对齐 $\tau_{\text{fri}}$。
 
 ### 3.3 单电机惯量 + 摩擦辨识（`motor_identify_train.py`）
 
@@ -439,7 +471,7 @@ python examples/motor_identify_train.py \
 | `--stage2-lr` | 同 `--lr` | 阶段 2 学习率（默认 `5e-4`） |
 | `--lr` | `5e-4` | 阶段 1 学习率 |
 | `--seq-len` | `20` | 摩擦网络滑窗长度 |
-| `--fo-mlp-hidden-layers` | `2` | fo_cascade ResMLP 残差块数 |
+| `--fo-mlp-hidden` | 自动 | fo_cascade 两层 MLP 隐层宽度，默认 `max(4*n_dof, 16)` |
 | `--lnet-width` / `--lnet-depth` | `32` / `2` | L-Net 规模 |
 | `--lnet-mass-eps` | `1e-2` | $H$ 对角初值/数值脊 |
 | `--lambda-physics` | `0.5` | PINN 摩擦物理项权重 $\lambda$ |
@@ -458,7 +490,7 @@ $$
 
 #### 评估
 
-训练结束后用 `robot_evaluate.py` 查看摩擦与总力矩（需与训练时 `--fo-mlp-hidden-layers` 一致，脚本会从 checkpoint 自动读取）：
+训练结束后用 `robot_evaluate.py` 查看摩擦与总力矩（脚本会从 checkpoint 自动读取 `fo_mlp_hidden_dim`）：
 
 ```bash
 python examples/robot_evaluate.py \

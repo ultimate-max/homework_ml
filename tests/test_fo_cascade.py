@@ -1,8 +1,7 @@
 import torch
-import torch.nn as nn
 
 from RobotDynamics.FrictionModule import HNetFOCascade, HNetFOCascadePINN
-from RobotDynamics.FrictionModule.fo_cascade import StribeckResMLP, _build_stribeck_mlp
+from RobotDynamics.FrictionModule.fo_cascade import StribeckMLP, _build_stribeck_mlp
 
 
 def test_fo_cascade_shapes_and_causality() -> None:
@@ -21,33 +20,20 @@ def test_fo_cascade_shapes_and_causality() -> None:
     assert v_seq.shape == (B, L, dof)
 
 
-def test_stribeck_resmlp_depth_and_gradient() -> None:
-    mlp = StribeckResMLP(6, 24, num_blocks=6)
-    assert len(mlp.blocks) == 6
+def test_stribeck_mlp_two_layer_tanh() -> None:
+    mlp = StribeckMLP(6, 24)
+    assert mlp.hidden_dim == 24
     x = torch.randn(5, 6, requires_grad=True)
     y = mlp(x)
     assert y.shape == (5, 6)
-    assert y.abs().max().item() <= 1.0
     y.sum().backward()
     assert x.grad is not None
 
 
-def test_build_stribeck_mlp_returns_resnet() -> None:
-    mlp = _build_stribeck_mlp(6, 24, num_hidden_layers=4)
-    assert isinstance(mlp, StribeckResMLP)
-    assert mlp.num_blocks == 4
-
-
-def test_integrator_1s_attensuates_high_frequency() -> None:
-    from RobotDynamics.FrictionModule.fo_cascade import _CausalIntegrator1s
-
-    B, L, dof = 1, 64, 1
-    t = torch.arange(L, dtype=torch.float32).view(1, L, 1)
-    x = torch.sin(2 * 3.14159 * 8 * t / L) + 0.2 * torch.sin(2 * 3.14159 * 20 * t / L)
-    x = x.expand(B, L, dof)
-    y = _CausalIntegrator1s(dof, init_alpha=0.15, init_leak=0.98)(x)
-    hf_ratio = (torch.diff(y, dim=1).pow(2).mean() / torch.diff(x, dim=1).pow(2).mean()).item()
-    assert hf_ratio < 0.5
+def test_build_stribeck_mlp_returns_two_layer() -> None:
+    mlp = _build_stribeck_mlp(6, 24)
+    assert isinstance(mlp, StribeckMLP)
+    assert len(mlp.net) == 3
 
 
 def test_fo_cascade_pinn_returns_physics() -> None:

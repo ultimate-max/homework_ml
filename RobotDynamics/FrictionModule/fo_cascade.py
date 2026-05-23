@@ -1,17 +1,14 @@
 """
-H-Net（Xun 等分数阶摩擦图 4 的神经化实现）：TCN₁ → MLP → 1/s → TCN₂。
+H-Net（Xun 等分数阶摩擦图 4 的神经化实现）：TCN₁ → MLP → TCN₂。
 
   [q, q̇]^{t-L:t}  --TCN₁-->  v_seq（等效分数阶微分）
-                 --ResMLP--> s_raw（Stribeck 非线性，残差块堆叠）
-                 --1/s-->  s_seq（因果积分低通，抑制 MLP 高频）
+                 --MLP-->    s_seq（两层 tanh MLP，逐时刻权重共享）
                  --TCN₂-->  τ_fri（线性因果积分 / 滞回记忆，无激活）
 
 TCN₁ 输入为位置与速度拼接（与 Yeo H-Net TCN 一致）。
 """
 
 from __future__ import annotations
-
-import math
 
 import torch
 import torch.nn as nn
@@ -21,7 +18,7 @@ from .stribeck import StribeckSCVParams
 
 
 class _CausalConv1d(nn.Module):
-    """左侧填充的因果 Conv1d：输出时刻 t 仅依赖输入 ≤ t。"""
+    """左侧填充的 causal Conv1d：输出时刻 t 仅依赖输入 ≤ t。"""
 
     def __init__(
         self,
@@ -76,102 +73,35 @@ class _CausalTCNStack(nn.Module):
         return self.net(x)
 
 
-class _CausalIntegrator1s(nn.Module):
+class StribeckMLP(nn.Module):
     """
-    因果离散 ``1/s``（后向欧拉 + 泄漏，防漂移）::
+    逐时刻两层 MLP（对 ``v_seq`` 每个时间步独立、权重共享）::
 
-        y[t] = leak * y[t-1] + α * x[t]
+        Linear(dof → hidden) → tanh → Linear(hidden → dof)
 
-    ``α`` 为每关节可学习步长；``leak``∈(0,1] 保持因果低通，滤除 MLP 高频分量。
-    """
-
-    def __init__(
-        self,
-        dof: int,
-        *,
-        init_alpha: float = 0.2,
-        init_leak: float = 0.98,
-    ) -> None:
-        super().__init__()
-        self.dof = dof
-        self.log_alpha = nn.Parameter(torch.full((dof,), math.log(init_alpha)))
-        self.logit_leak = nn.Parameter(
-            torch.full((dof,), math.log(init_leak / (1.0 - init_leak)))
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, L, dof) → y: (B, L, dof)"""
-        alpha = F.softplus(self.log_alpha) + 1e-6
-        leak = torch.sigmoid(self.logit_leak).clamp(0.5, 0.999)
-        state = alpha * x[:, 0, :]
-        steps: list[torch.Tensor] = [state]
-        for t in range(1, x.shape[1]):
-            state = leak * state + alpha * x[:, t, :]
-            steps.append(state)
-        return torch.stack(steps, dim=1)
-
-
-class _StribeckResBlock(nn.Module):
-    """残差块：y = x + W₂(ReLU(W₁(x)))。"""
-
-    def __init__(self, dim: int) -> None:
-        super().__init__()
-        self.fc1 = nn.Linear(dim, dim)
-        self.fc2 = nn.Linear(dim, dim)
-        nn.init.xavier_normal_(self.fc1.weight)
-        nn.init.zeros_(self.fc1.bias)
-        nn.init.xavier_normal_(self.fc2.weight, gain=0.1)
-        nn.init.zeros_(self.fc2.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = F.relu(self.fc1(x))
-        return x + self.fc2(h)
-
-
-class StribeckResMLP(nn.Module):
-    """
-    逐时刻 ResNet 式 Stribeck MLP（对 ``v_seq`` 每个时间步独立、权重共享）。
-
-    隐层与残差块内使用 ReLU（梯度比 tanh 更陡）；末层 ``out_proj`` 后接 tanh 平滑有界输出。
-    ``num_blocks`` 个残差块堆叠在隐空间 ``hidden_dim`` 上。
+    输出层为线性，力矩尺度由后续 TCN₂ / head 承担。
     """
 
-    def __init__(
-        self,
-        dof: int,
-        hidden_dim: int,
-        *,
-        num_blocks: int = 6,
-    ) -> None:
+    def __init__(self, dof: int, hidden_dim: int) -> None:
         super().__init__()
         self.dof = dof
         self.hidden_dim = hidden_dim
-        self.num_blocks = max(1, int(num_blocks))
-        self.in_proj = nn.Linear(dof, hidden_dim)
-        self.blocks = nn.ModuleList(
-            [_StribeckResBlock(hidden_dim) for _ in range(self.num_blocks)]
+        self.net = nn.Sequential(
+            nn.Linear(dof, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, dof),
         )
-        self.out_proj = nn.Linear(hidden_dim, dof)
-        nn.init.xavier_normal_(self.in_proj.weight)
-        nn.init.zeros_(self.in_proj.bias)
-        nn.init.xavier_normal_(self.out_proj.weight)
-        nn.init.zeros_(self.out_proj.bias)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = F.relu(self.in_proj(x))
-        for blk in self.blocks:
-            h = blk(h)
-        return torch.tanh(self.out_proj(h))
+        return self.net(x)
 
 
-def _build_stribeck_mlp(
-    dof: int,
-    hidden_dim: int,
-    *,
-    num_hidden_layers: int = 6,
-) -> StribeckResMLP:
-    """构建 ResNet 式 Stribeck MLP（``num_hidden_layers`` = 残差块个数）。"""
-    return StribeckResMLP(dof, hidden_dim, num_blocks=num_hidden_layers)
+def _build_stribeck_mlp(dof: int, hidden_dim: int) -> StribeckMLP:
+    return StribeckMLP(dof, hidden_dim)
 
 
 def _stack_q_qd(q_seq: torch.Tensor, qd_seq: torch.Tensor) -> torch.Tensor:
@@ -183,9 +113,7 @@ def _stack_q_qd(q_seq: torch.Tensor, qd_seq: torch.Tensor) -> torch.Tensor:
 
 class HNetFOCascade(nn.Module):
     """
-    级联摩擦网络，对齐 Xun 图 4：微分 → Stribeck → ``1/s`` 低通 → 记忆积分。
-
-    TCN₁ 在 ``[q, q̇]`` 历史上做因果卷积；ResNet 式 Stribeck MLP 后接 ``integrate_1s``。
+    级联摩擦网络：TCN₁([q,q̇]) → 两层 tanh MLP → TCN₂ → τ_fri。
     """
 
     def __init__(
@@ -197,15 +125,13 @@ class HNetFOCascade(nn.Module):
         *,
         tcn_layers: int = 2,
         mlp_hidden: int | None = None,
-        mlp_hidden_layers: int = 6,
     ) -> None:
         super().__init__()
         self.dof = dof
         self.seq_len = seq_len
         mlp_h = mlp_hidden if mlp_hidden is not None else max(4 * dof, 16)
-        self.mlp_hidden_layers = max(1, int(mlp_hidden_layers))
+        self.mlp_hidden = mlp_h
 
-        # TCN₁：线性因果卷积（无激活），近似分数阶微分 1/s^α
         self.tcn_diff = _CausalTCNStack(
             2 * dof,
             hidden_channels,
@@ -215,10 +141,7 @@ class HNetFOCascade(nn.Module):
         )
         self.proj_v = nn.Conv1d(hidden_channels, dof, kernel_size=1)
 
-        self.stribeck_mlp = _build_stribeck_mlp(
-            dof, mlp_h, num_hidden_layers=self.mlp_hidden_layers
-        )
-        self.integrate_1s = _CausalIntegrator1s(dof)
+        self.stribeck_mlp = _build_stribeck_mlp(dof, mlp_h)
 
         self.tcn_int = _CausalTCNStack(
             dof,
@@ -253,8 +176,7 @@ class HNetFOCascade(nn.Module):
         h_v = self.tcn_diff(x)
         v_seq = self.proj_v(h_v).transpose(1, 2)
 
-        s_raw = self.stribeck_mlp(v_seq)
-        s_seq = self.integrate_1s(s_raw)
+        s_seq = self.stribeck_mlp(v_seq)
 
         s_ch = s_seq.transpose(1, 2)
         h_f = self.tcn_int(s_ch)
@@ -271,15 +193,14 @@ class HNetFOCascade(nn.Module):
             raise ValueError(f"Expected sequence length {self.seq_len}")
         x = _stack_q_qd(q_seq, qd_seq)
         v_seq = self.proj_v(self.tcn_diff(x)).transpose(1, 2)
-        s_raw = self.stribeck_mlp(v_seq)
-        s_seq = self.integrate_1s(s_raw)
+        s_seq = self.stribeck_mlp(v_seq)
         s_ch = s_seq.transpose(1, 2)
         tau_fri = self.head(self.tcn_int(s_ch)[:, :, -1])
         return (
             tau_fri,
             v_seq[:, -1, :],
             s_seq[:, -1, :],
-            s_raw[:, -1, :],
+            s_seq[:, -1, :],
             v_seq,
         )
 
@@ -288,7 +209,7 @@ class HNetFOCascadePINN(nn.Module):
     """
     fo_cascade + SCV 物理支路（Hu 等 PINN Eq. (6)）。
 
-    - ``fo``：TCN₁([q,q̇])→MLP→1/s→TCN₂，输出 τ_pred（含记忆/滞回）
+    - ``fo``：TCN₁([q,q̇])→MLP→TCN₂，输出 τ_pred
     - ``scv``：SCV(q̇_t)，输出 τ_physics（瞬时 Stribeck 形状）
     """
 
@@ -301,7 +222,6 @@ class HNetFOCascadePINN(nn.Module):
         *,
         tcn_layers: int = 2,
         mlp_hidden: int | None = None,
-        mlp_hidden_layers: int = 3,
     ) -> None:
         super().__init__()
         self.dof = dof
@@ -313,7 +233,6 @@ class HNetFOCascadePINN(nn.Module):
             kernel_size=kernel_size,
             tcn_layers=tcn_layers,
             mlp_hidden=mlp_hidden,
-            mlp_hidden_layers=mlp_hidden_layers,
         )
         self.scv = StribeckSCVParams(dof)
 
