@@ -12,6 +12,14 @@ from .sequence_data import (
     pickle_has_mcg_decomposition,
     stack_trajectories_to_flat,
 )
+from .gms import (
+    GmsParams,
+    HNetGMS,
+    HNetGMSPINN,
+    gms_integrate,
+    gms_limit_surface,
+    warmstart_gms_from_samples,
+)
 from .stribeck import (
     HNetStribeck,
     HNetStribeckPINN,
@@ -29,6 +37,12 @@ __all__ = [
     "HNetFOCascadePINN",
     "StribeckMLP",
     "HNetTCN",
+    "HNetGMS",
+    "HNetGMSPINN",
+    "GmsParams",
+    "gms_integrate",
+    "gms_limit_surface",
+    "warmstart_gms_from_samples",
     "HNetStribeck",
     "HNetStribeckPINN",
     "StribeckSCVParams",

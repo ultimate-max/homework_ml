@@ -84,7 +84,13 @@ def load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[Mysteric
         lnet_layers=l_d,
         friction_backend=backend,
     )
-    if backend == "stribeck_pinn":
+    elif backend in ("gms", "gms_pinn"):
+        n_blk = ckpt.get("gms_n_blocks", ckpt.get("gms_n_elements"))
+        if n_blk is not None:
+            kw["gms_n_blocks"] = int(n_blk)
+        if "gms_dt" in ckpt:
+            kw["gms_dt"] = float(ckpt["gms_dt"])
+    if backend == "stribeck_pinn" or backend == "gms_pinn":
         kw["stribeck_hidden"] = _infer_pinn_hidden(state, dof)
     elif backend in ("fo_cascade", "fo_cascade_pinn"):
         hid = ckpt.get("fo_mlp_hidden_dim", ckpt.get("fo_mlp_hidden_layers"))

@@ -5,6 +5,8 @@
 摩擦后端（Hu 等 SCV / PINN）:
   --friction-backend stribeck       纯可学习 SCV 物理模型
   --friction-backend stribeck_pinn  MLP + SCV 物理损失（论文 Eq. (6)）
+  --friction-backend gms            纯可学习 GMS 物理模型（迟滞）
+  --friction-backend gms_pinn       MLP + GMS 物理损失
   --friction-backend tcn            原 TCN（Yeo 等）
   --friction-backend fo_cascade       TCN₁→两层 tanh MLP→TCN₂（Xun 图 4 简化）
   --friction-backend fo_cascade_pinn  fo_cascade + SCV PINN（Eq. 6）
@@ -49,13 +51,14 @@ from RobotDynamics.FrictionModule import (
     mysteric_losses,
     pickle_has_mcg_decomposition,
     stack_trajectories_to_flat,
+    warmstart_gms_from_samples,
     warmstart_scv_from_samples,
 )
 from RobotDynamics.MystericNet import MystericNet
 
 TrainPhase = Literal["joint", "lnet", "friction"]
 
-PHYSICS_ONLY_FRICTION = frozenset({"stribeck"})
+PHYSICS_ONLY_FRICTION = frozenset({"stribeck", "gms"})
 
 
 def _checkpoint_payload(
@@ -83,6 +86,9 @@ def _checkpoint_payload(
         "smape_eps": args.smape_eps,
         "data_path": str(args.data.resolve()),
         "fo_mlp_hidden_dim": args.fo_mlp_hidden,
+        "gms_n_blocks": args.gms_n_blocks,
+        "gms_n_elements": args.gms_n_blocks,
+        "gms_dt": getattr(args, "_gms_dt_resolved", args.gms_dt),
         "stage1_epochs": int(getattr(args, "_stage1_epochs", args.epochs)),
         "stage2_epochs": int(args.stage2_epochs),
         "stage3_epochs": int(args.stage3_epochs),
@@ -125,7 +131,15 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--test-labels", nargs="*", default=["e", "v", "q"])
     p.add_argument(
         "--friction-backend",
-        choices=("tcn", "fo_cascade", "fo_cascade_pinn", "stribeck", "stribeck_pinn"),
+        choices=(
+            "tcn",
+            "fo_cascade",
+            "fo_cascade_pinn",
+            "stribeck",
+            "stribeck_pinn",
+            "gms",
+            "gms_pinn",
+        ),
         default="stribeck_pinn",
     )
     p.add_argument(
@@ -134,6 +148,22 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         metavar="D",
         help="fo_cascade 两层 MLP 隐层宽度，默认 max(4*n_dof, 16)",
+    )
+    p.add_argument(
+        "--gms-blocks",
+        "--gms-n-elements",
+        dest="gms_n_blocks",
+        type=int,
+        default=3,
+        metavar="N",
+        help="每关节并联 GMS 块数 N（gms / gms_pinn；τ_fri = Σ F_i + σ₁v）",
+    )
+    p.add_argument(
+        "--gms-dt",
+        type=float,
+        default=None,
+        metavar="S",
+        help="GMS 积分步长 (s)。gms/gms_pinn 下默认从 pickle 的 t 推断 mean(diff(t))",
     )
     p.add_argument("--seq-len", type=int, default=30)
     p.add_argument("--epochs", type=int, default=500)
@@ -348,7 +378,7 @@ def _compute_friction_loss(
     dtype: torch.dtype,
 ) -> torch.Tensor:
     fri_kind = _effective_fri_loss(args)
-    if args.friction_backend in ("stribeck_pinn", "fo_cascade_pinn"):
+    if args.friction_backend in ("stribeck_pinn", "fo_cascade_pinn", "gms_pinn"):
         assert tau_phys is not None
         lf, _, _ = friction_pinn_loss(
             tau_fri,
@@ -378,7 +408,7 @@ def main() -> None:
     cuda = bool(args.c) and torch.cuda.is_available()
     device = torch.device("cuda" if cuda else "cpu")
 
-    train_data, test_data, _, _ = load_dataset(
+    train_data, test_data, _, dt_mean = load_dataset(
         filename=str(args.data),
         test_label=tuple(args.test_labels),
     )
@@ -413,6 +443,18 @@ def main() -> None:
     l_w = args.lnet_width if args.lnet_width is not None else hyper["n_width"]
     l_d = args.lnet_depth if args.lnet_depth is not None else hyper["n_depth"]
 
+    if args.friction_backend in ("gms", "gms_pinn") and args.gms_n_blocks < 1:
+        raise SystemExit("--gms-blocks 须 ≥ 1")
+
+    gms_dt = args.gms_dt
+    if args.friction_backend in ("gms", "gms_pinn"):
+        if gms_dt is None:
+            gms_dt = float(dt_mean)
+            print(f"  GMS: blocks={args.gms_n_blocks}  dt={gms_dt:g} s（由数据 t 推断）")
+        else:
+            print(f"  GMS: blocks={args.gms_n_blocks}  dt={gms_dt:g} s（CLI 指定）")
+        args._gms_dt_resolved = gms_dt
+
     model = MystericNet(
         dof=n_dof,
         seq_len=args.seq_len,
@@ -420,9 +462,21 @@ def main() -> None:
         lnet_layers=l_d,
         friction_backend=args.friction_backend,
         fo_mlp_hidden_dim=args.fo_mlp_hidden,
+        gms_n_blocks=args.gms_n_blocks,
+        gms_dt=gms_dt if args.friction_backend in ("gms", "gms_pinn") else 0.001,
     ).to(device)
 
     eff_fri = _effective_fri_loss(args)
+    if args.friction_backend in ("gms", "gms_pinn"):
+        if args.fri_loss == "smape" and eff_fri == "mse":
+            print("  提示: gms 下 SMAPE 对 l_fri 易饱和≈2，已自动改用 fri_loss=mse。")
+        if hasattr(model.hnet, "gms"):
+            n_init = min(4096, qdi.shape[0])
+            warmstart_gms_from_samples(
+                model.hnet.gms, qdi[:n_init], tau_fri_t[:n_init]
+            )
+            print(f"  已 warm-start GMS 极限面 v_a（N={n_init}）。")
+
     if args.friction_backend == "stribeck":
         if args.fri_loss == "smape" and eff_fri == "mse":
             print("  提示: stribeck 下 SMAPE 对 l_fri 易饱和≈2，已自动改用 fri_loss=mse。")
@@ -450,7 +504,12 @@ def main() -> None:
 
     print(
         f"device={device}  n_dof={n_dof}  friction={args.friction_backend}  "
-        f"λ_phys={args.lambda_physics}  w_fri={w_fri}  "
+        + (
+            f"gms_blocks={args.gms_n_blocks}  "
+            if args.friction_backend in ("gms", "gms_pinn")
+            else ""
+        )
+        + f"λ_phys={args.lambda_physics}  w_fri={w_fri}  "
         f"tau_loss={args.tau_loss}  fri_loss={eff_fri}"
         + (f" (CLI={args.fri_loss})" if eff_fri != args.fri_loss else "")
         + f"  "
@@ -460,6 +519,7 @@ def main() -> None:
     if stage3_ep > 0 and not supervise_fri and args.friction_backend not in (
         "stribeck_pinn",
         "fo_cascade_pinn",
+        "gms_pinn",
     ):
         print(
             "  警告: 阶段 3 需要 l_fri，但无 τ_fri 监督且非 PINN 后端。",

@@ -302,6 +302,8 @@ python examples/robot_train.py \
 | `fo_cascade_pinn` | fo_cascade + SCV，`friction_pinn_loss`（Hu 等 PINN，$\lambda$=`--lambda-physics`） |
 | `stribeck` | 可学习 SCV 物理模型（**仅** $\dot q$，无 MLP/TCN）；见下文 **§3.2.1** |
 | `stribeck_pinn` | MLP + SCV 物理损失（Hu 等 PINN） |
+| `gms` | 可学习 **GMS** 物理模型（$N$ 并联 stick/slip + $\sigma_1 v$，对 `qd_seq` 窗内积分）；见 **§3.2.2** |
+| `gms_pinn` | MLP + GMS 物理损失（`--lambda-physics`） |
 
 **损失（Mysteric-Net，默认不含能量项）**：
 
@@ -390,7 +392,7 @@ python examples/robot_train.py \
 
 **推荐**：
 
-- **多轴机械臂 + 迟滞摩擦**（如 `robot_fric.pickle`）：优先 **`fo_cascade_pinn`**，不要用纯 `stribeck`。
+- **多轴机械臂 + 迟滞摩擦**（如 `robot_fric.pickle`）：优先 **`fo_cascade_pinn`** 或 **`gms` / `gms_pinn`**，不要用纯 `stribeck`。
 - 若坚持用 `stribeck`：显式加 **`--fri-loss mse`**；三阶段时 **只在 `[S1]` / `[S3-F]` 看 `l_fri` 是否下降**。
 
 ```bash
@@ -413,6 +415,44 @@ python examples/robot_train.py \
   --fo-mlp-hidden 24 \
   --stage1-epochs 2000 --stage2-epochs 2000 --stage3-epochs 1000 \
   --stage1-lr 1e-3 --stage2-lr 5e-4 --stage3-lr 1e-3 \
+  --test-labels e v q \
+  -m 1
+```
+
+#### 3.2.2 纯 `gms` 后端（迟滞物理模型）
+
+`--friction-backend gms` 使用 **Generalized Maxwell-Slip (GMS)**：每关节 $N$ 个并联 stick/slip 单元 + 粘性 $\sigma_1 v$，对滑窗 `qd_seq` 做显式 Euler 积分，输出窗末 $\tau_{\text{fri}}$。实现见 `RobotDynamics/FrictionModule/gms.py`。
+
+| 参数 | CLI | 默认 |
+|------|-----|------|
+| 并联 GMS 块数 $N$ | `--gms-blocks` | 3（别名 `--gms-n-elements`） |
+| 积分步长 | `--gms-dt` | **默认从 pickle 的 `t` 推断** `mean(diff(t))`；须与真实采样一致 |
+
+**重要**：GMS 对 `qd_seq` 做 Euler 积分，**`--gms-dt` 必须等于数据采样周期**。例如 `robot_fric.pickle` 为 **0.005 s**（200 Hz），不是 1 kHz 的 0.001。未指定时 `robot_train.py` 会从 `load_dataset` 的 `dt_mean` 自动填入并打印。
+
+与 `stribeck` 相同：纯物理后端自动 **warm-start** 极限面 $v_a$，SMAPE 下自动改 **MSE**；`--lambda-physics` 仅对 `gms_pinn` 有效。
+
+```bash
+# 纯 GMS（robot_fric：dt=0.005，可省略 --gms-dt 由数据推断）
+python examples/robot_train.py \
+  --data data/robot_fric.pickle \
+  --friction-backend gms \
+  --gms-blocks 3 \
+  --gms-dt 0.005 \
+  --fri-loss mse \
+  --stage1-epochs 2000 --stage2-epochs 2000 --stage3-epochs 1000 \
+  --test-labels e v q \
+  -m 1
+
+# MLP + GMS 物理约束（robot_fric 须 --gms-dt 0.005 或依赖自动推断）
+python examples/robot_train.py \
+  --data data/robot_fric.pickle \
+  --friction-backend gms_pinn \
+  --lambda-physics 0.5 \
+  --gms-blocks 3 \
+  --gms-dt 0.005 \
+  --fri-loss mse \
+  --stage1-epochs 2000 --stage2-epochs 2000 --stage3-epochs 1000 \
   --test-labels e v q \
   -m 1
 ```
