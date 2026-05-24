@@ -44,6 +44,30 @@ class StribeckSCVParams(nn.Module):
         )
 
 
+def warmstart_scv_from_samples(
+    scv: StribeckSCVParams,
+    qd: torch.Tensor,
+    tau_fri: torch.Tensor,
+    *,
+    qd_min: float = 0.02,
+    k_c_floor: float = 0.05,
+) -> None:
+    """用 ``median(|τ_fri|)``（``|q̇|>qd_min``）粗估 ``k_c,k_s``，避免 SCV 初值过小。"""
+    if qd.shape != tau_fri.shape or qd.ndim != 2:
+        raise ValueError(f"qd {qd.shape} 与 tau_fri {tau_fri.shape} 须同为 (N, dof)")
+    dof = scv.dof
+    if qd.shape[1] != dof:
+        raise ValueError(f"Expected dof {dof}, got qd {qd.shape[1]}")
+    with torch.no_grad():
+        for j in range(dof):
+            mask = qd[:, j].abs() > qd_min
+            if int(mask.sum()) < 8:
+                continue
+            est = tau_fri[mask, j].abs().median().clamp(min=k_c_floor)
+            scv.log_k_c[j] = math.log(float(est))
+            scv.log_k_s[j] = math.log(float(est) * 1.05)
+
+
 def cv_torque(
     qd: torch.Tensor,
     k_v: torch.Tensor,

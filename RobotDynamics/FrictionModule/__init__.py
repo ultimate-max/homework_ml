@@ -12,7 +12,14 @@ from .sequence_data import (
     pickle_has_mcg_decomposition,
     stack_trajectories_to_flat,
 )
-from .stribeck import HNetStribeck, HNetStribeckPINN, StribeckSCVParams, cv_torque, scv_torque
+from .stribeck import (
+    HNetStribeck,
+    HNetStribeckPINN,
+    StribeckSCVParams,
+    cv_torque,
+    scv_torque,
+    warmstart_scv_from_samples,
+)
 from .synthetic_plant import build_windows, simulate_2dof_inverse_dynamics
 from .fo_cascade import HNetFOCascade, HNetFOCascadePINN, StribeckMLP
 from .tcn import HNetTCN
@@ -27,6 +34,7 @@ __all__ = [
     "StribeckSCVParams",
     "cv_torque",
     "scv_torque",
+    "warmstart_scv_from_samples",
     "friction_pinn_loss",
     "friction_supervised_loss",
     "mysteric_losses",

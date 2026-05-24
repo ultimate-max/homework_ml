@@ -49,10 +49,13 @@ from RobotDynamics.FrictionModule import (
     mysteric_losses,
     pickle_has_mcg_decomposition,
     stack_trajectories_to_flat,
+    warmstart_scv_from_samples,
 )
 from RobotDynamics.MystericNet import MystericNet
 
 TrainPhase = Literal["joint", "lnet", "friction"]
+
+PHYSICS_ONLY_FRICTION = frozenset({"stribeck"})
 
 
 def _checkpoint_payload(
@@ -327,6 +330,13 @@ def _use_energy_loss(
     return phase == "lnet" and stage2_ep > 0 and not args.no_stage2_energy
 
 
+def _effective_fri_loss(args: argparse.Namespace) -> str:
+    """纯 SCV 在 SMAPE 下 pred≪target 时 l_fri≈2 且不降，改用 MSE。"""
+    if args.friction_backend in PHYSICS_ONLY_FRICTION and args.fri_loss == "smape":
+        return "mse"
+    return args.fri_loss
+
+
 def _compute_friction_loss(
     *,
     args: argparse.Namespace,
@@ -337,6 +347,7 @@ def _compute_friction_loss(
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
+    fri_kind = _effective_fri_loss(args)
     if args.friction_backend in ("stribeck_pinn", "fo_cascade_pinn"):
         assert tau_phys is not None
         lf, _, _ = friction_pinn_loss(
@@ -345,7 +356,7 @@ def _compute_friction_loss(
             tau_phys,
             lambda_physics=args.lambda_physics,
             supervise_friction=supervise_fri,
-            fri_loss=args.fri_loss,
+            fri_loss=fri_kind,
             smape_eps=args.smape_eps,
         )
         return lf
@@ -353,7 +364,7 @@ def _compute_friction_loss(
         return friction_supervised_loss(
             tau_fri,
             tfb,
-            args.fri_loss,
+            fri_kind,
             smape_eps=args.smape_eps,
         )
     return torch.zeros((), device=device, dtype=dtype)
@@ -411,6 +422,17 @@ def main() -> None:
         fo_mlp_hidden_dim=args.fo_mlp_hidden,
     ).to(device)
 
+    eff_fri = _effective_fri_loss(args)
+    if args.friction_backend == "stribeck":
+        if args.fri_loss == "smape" and eff_fri == "mse":
+            print("  提示: stribeck 下 SMAPE 对 l_fri 易饱和≈2，已自动改用 fri_loss=mse。")
+        if hasattr(model.hnet, "scv"):
+            n_init = min(4096, qdi.shape[0])
+            warmstart_scv_from_samples(
+                model.hnet.scv, qdi[:n_init], tau_fri_t[:n_init]
+            )
+            print(f"  已 warm-start SCV（k_c/k_s，N={n_init}）。")
+
     stage1_ep, stage2_ep, stage3_ep, total_ep = _resolve_stage_epochs(args)
     args._stage1_epochs = stage1_ep
     stage1_lr = float(args.stage1_lr if args.stage1_lr is not None else args.lr)
@@ -429,7 +451,9 @@ def main() -> None:
     print(
         f"device={device}  n_dof={n_dof}  friction={args.friction_backend}  "
         f"λ_phys={args.lambda_physics}  w_fri={w_fri}  "
-        f"tau_loss={args.tau_loss}  fri_loss={args.fri_loss}  "
+        f"tau_loss={args.tau_loss}  fri_loss={eff_fri}"
+        + (f" (CLI={args.fri_loss})" if eff_fri != args.fri_loss else "")
+        + f"  "
         f"train N={N}  test N={test_qp.shape[0]}\n"
         f"  {_format_schedule(stage1_ep, stage2_ep, stage3_ep, total_ep, stage1_lr=stage1_lr, stage2_lr=stage2_lr, stage3_lr=stage3_lr)}"
     )
@@ -554,9 +578,10 @@ def main() -> None:
                     fri_contrib = 0.0
                 else:
                     fri_contrib = w_fri * lf_m
+                fri_note = " (S2:冻结)" if phase == "lnet" else ""
                 print(
                     f"epoch {epoch:4d} [{_phase_label(phase)}]  loss={loss_acc/n_s:.5f}  "
-                    f"l_tau={lt_m:.4f}  l_fri={lf_m:.4f}  w_fri*l_fri={fri_contrib:.4f}  "
+                    f"l_tau={lt_m:.4f}  l_fri={lf_m:.4f}{fri_note}  w_fri*l_fri={fri_contrib:.4f}  "
                     f"RMSE_test≈{rmse:.4f}  "
                     f"time/epoch={epoch_sec:.2f}s  avg50={avg_50:.2f}s/epoch"
                 )

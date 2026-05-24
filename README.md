@@ -300,7 +300,7 @@ python examples/robot_train.py \
 | `tcn` | 时序卷积（原 Mysteric-Net 论文） |
 | `fo_cascade` | TCN₁([q,q̇])→**两层 tanh MLP**→TCN₂，对齐 Xun 图 4 简化版 |
 | `fo_cascade_pinn` | fo_cascade + SCV，`friction_pinn_loss`（Hu 等 PINN，$\lambda$=`--lambda-physics`） |
-| `stribeck` | 可学习 Stribeck-Coulomb-Viscous 物理模型 |
+| `stribeck` | 可学习 SCV 物理模型（**仅** $\dot q$，无 MLP/TCN）；见下文 **§3.2.1** |
 | `stribeck_pinn` | MLP + SCV 物理损失（Hu 等 PINN） |
 
 **损失（Mysteric-Net，默认不含能量项）**：
@@ -313,7 +313,7 @@ $$
 | 项 | 何时启用 | 含义 |
 |----|----------|------|
 | $l_\tau$ | 始终 | `--tau-loss smape`（默认）或 `mse` |
-| $l_{\text{fri}}$ | 有 `m/c/g` 或 PINN 后端 | **`--fri-loss smape`（默认）** 或 `mse`；与 $l_\tau$ 相同 SMAPE 公式，利于小力矩关节。PINN：数据项 + SCV 项均用 `fri_loss` |
+| $l_{\text{fri}}$ | 有 `m/c/g` 或 PINN 后端 | **`--fri-loss smape`（默认）** 或 `mse`；与 $l_\tau$ 相同 SMAPE 公式，利于小力矩关节。PINN：数据项 + SCV 项均用 `fri_loss`。**纯 `stribeck` 后端见 §3.2.1** |
 | $w_{\text{fri}}$ | `--friction-loss-weight` | SMAPE 摩擦下默认 **1.0**；仅当 `fri-loss mse` 且 $l_{\text{fri}}$ 很大时用 **0.01~0.1** |
 | $l_E$ | 阶段 2 默认；或 `--energy-loss` | Yeo Eq. (7)；`RobotDynamics/FrictionModule/energy_loss.py` |
 
@@ -346,7 +346,7 @@ python examples/synthetic_train.py --data data/synthetic_2dof_inverse.npz --ener
 | 阶段 | 轮数 | 可训练 | 损失 | 日志 |
 |------|------|--------|------|------|
 | **1** | `--stage1-epochs` | L-Net + hnet | $l_\tau + w_{\text{fri}}\,l_{\text{fri}}$（可选 `--energy-loss`） | `[S1]` |
-| **2** | `--stage2-epochs` | **仅 L-Net**（hnet 冻结） | $l_\tau$ **+ 默认 $l_E$**（可用 `--no-stage2-energy` 关闭） | `[S2-L]` |
+| **2** | `--stage2-epochs` | **仅 L-Net**（hnet 冻结） | $l_\tau$ **+ 默认 $l_E$**（可用 `--no-stage2-energy` 关闭） | `[S2-L]`；日志中 **`l_fri` 仅监控、不下降** |
 | **3** | `--stage3-epochs` | **仅 hnet**（L-Net 冻结） | 仅 $w_{\text{fri}}\,l_{\text{fri}}$ | `[S3-F]` |
 
 - `--stage2-epochs 0`（默认）= 单阶段联合训练。  
@@ -370,6 +370,52 @@ python examples/robot_train.py \
 ```
 
 阶段 2 结束可用 `robot_evaluate.py` 看刚体项；阶段 3 在 L-Net 固定后进一步对齐 $\tau_{\text{fri}}$。
+
+#### 3.2.1 纯 `stribeck` 后端与 `l_fri` 不降
+
+`--friction-backend stribeck` 时，摩擦子网络 **只有 SCV 六个标量/关节**（$k_v,k_c,k_a,k_s,v_s,\alpha$），输出 $\tau_{\text{fri}}=\mathrm{SCV}(\dot q_t)$，**不含** MLP/TCN，也 **不使用** `--lambda-physics`（该参数仅对 `stribeck_pinn` / `fo_cascade_pinn` 有效）。
+
+**常见现象**：阶段 1 日志里 `l_fri ≈ 1.996` 长期不变，而 `l_tau` 在下降。
+
+| 原因 | 说明 |
+|------|------|
+| SMAPE 饱和 | 默认 SCV 初值 $k_c\approx 0.1$ 时，$\hat\tau_{\text{fri}}\sim 0.02\,\mathrm{N·m}$，而标签 $\tau_{\text{fri,ref}}\sim 1\,\mathrm{N·m}$；SMAPE 在 $\|\hat\tau\|\ll\|\tau\|$ 时 **≈ 2 且梯度≈0**，几乎学不动 |
+| 阶段 2 冻结 | `[S2-L]` 中 hnet 已冻结，**`l_fri` 不会下降**（日志带 `(S2:冻结)`，仅作监控） |
+| 模型能力 | `robot_fric.pickle` 的 $\tau_{\text{fri,ref}}=\tau-m-c-g$ 含 **迟滞/历史**；瞬时 SCV($\dot q$) 难以完全拟合 |
+
+**`robot_train.py` 已内置处理（无需改命令）**：
+
+1. **SCV warm-start**：启动时用训练样本在 $| \dot q |>\texttt{qd\_min}$ 处取 $\mathrm{median}(|\tau_{\text{fri,ref}}|)$，初始化 $k_c,k_s$（`warmstart_scv_from_samples`，见 `RobotDynamics/FrictionModule/stribeck.py`）。
+2. **自动改用 MSE**：若 CLI 为 `--fri-loss smape` 且后端为 `stribeck`，实际 **`fri_loss=mse`**，避免 $l_{\text{fri}}$ 钉在 ≈2；启动日志会显示 `fri_loss=mse (CLI=smape)`。
+
+**推荐**：
+
+- **多轴机械臂 + 迟滞摩擦**（如 `robot_fric.pickle`）：优先 **`fo_cascade_pinn`**，不要用纯 `stribeck`。
+- 若坚持用 `stribeck`：显式加 **`--fri-loss mse`**；三阶段时 **只在 `[S1]` / `[S3-F]` 看 `l_fri` 是否下降**。
+
+```bash
+# 纯 SCV（能力有限，仅适合快速试 SCV 参数量级）
+python examples/robot_train.py \
+  --data data/robot_fric.pickle \
+  --friction-backend stribeck \
+  --fri-loss mse \
+  --stage1-epochs 2000 --stage2-epochs 2000 --stage3-epochs 1000 \
+  --stage1-lr 1e-3 --stage2-lr 5e-4 --stage3-lr 1e-3 \
+  --test-labels e v q \
+  -m 1
+
+# 机械臂迟滞摩擦（推荐）
+python examples/robot_train.py \
+  --data data/robot_fric.pickle \
+  --friction-backend fo_cascade_pinn \
+  --lambda-physics 0.8 \
+  --fri-loss mse \
+  --fo-mlp-hidden 24 \
+  --stage1-epochs 2000 --stage2-epochs 2000 --stage3-epochs 1000 \
+  --stage1-lr 1e-3 --stage2-lr 5e-4 --stage3-lr 1e-3 \
+  --test-labels e v q \
+  -m 1
+```
 
 ### 3.3 单电机惯量 + 摩擦辨识（`motor_identify_train.py`）
 
