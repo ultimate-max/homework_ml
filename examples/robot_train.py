@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import sys
 import time
 from pathlib import Path
@@ -57,11 +58,14 @@ def _net_checkpoint_path(
     friction_backend: str,
     *,
     interrupt: bool = False,
+    epoch: int | None = None,
     checkpoints_dir: Path | None = None,
 ) -> Path:
     stem = f"{friction_backend}_net"
     if interrupt:
         stem = f"{stem}_interrupt"
+    elif epoch is not None:
+        stem = f"{stem}_epoch{int(epoch):05d}"
     base = checkpoints_dir if checkpoints_dir is not None else ROOT / "checkpoints"
     return base / f"{stem}.pt"
 
@@ -144,6 +148,29 @@ def _save_checkpoint(
     print(f"已保存: {path.resolve()}")
 
 
+def _load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[MystericNet, dict]:
+    """与 robot_evaluate.load_mysteric_checkpoint 相同逻辑（避免重复维护）。"""
+    ev_path = Path(__file__).resolve().parent / "robot_evaluate.py"
+    spec = importlib.util.spec_from_file_location("robot_evaluate", ev_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载 {ev_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.load_mysteric_checkpoint(path, device)
+
+
+def _resume_start_epoch(ckpt: dict, path: Path) -> int:
+    if "epoch" in ckpt:
+        return int(ckpt["epoch"]) + 1
+    from_name = path.stem
+    if "_epoch" in from_name:
+        try:
+            return int(from_name.rsplit("_epoch", 1)[-1]) + 1
+        except ValueError:
+            pass
+    return 1
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Mysteric-Net（L-Net + 摩擦）联合训练")
     p.add_argument("--data", type=Path, default=ROOT / "data" / "robot.pickle")
@@ -187,7 +214,20 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seq-len", type=int, default=30)
     p.add_argument("--epochs", type=int, default=500)
     p.add_argument("--batch", type=int, default=256)
-    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument(
+        "--lr",
+        type=float,
+        default=1e-3,
+        help="阶段 1 摩擦子网 hnet 学习率；阶段 2 为 L-Net 学习率（若未设 --stage2-lr）",
+    )
+    p.add_argument(
+        "--lnet-lr",
+        type=float,
+        default=None,
+        metavar="LR",
+        help="阶段 1 联合训练时 L-Net 学习率（默认与 --lr 相同）。"
+        "例: --lr 1e-3 --lnet-lr 1e-4 让摩擦(hnet)快、惯量(lnet)慢",
+    )
     p.add_argument("--lnet-width", type=int, default=None, help="默认用 suggest_hyper")
     p.add_argument("--lnet-depth", type=int, default=None)
     p.add_argument(
@@ -241,6 +281,13 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="checkpoint 路径，默认 checkpoints/{--friction-backend}_net.pt",
     )
+    p.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        metavar="CKPT",
+        help="从已保存 checkpoint 继续训练（读取 state_dict 与 epoch）",
+    )
     p.add_argument("-c", nargs="?", const=1, default=1, type=int)
     p.add_argument(
         "--loss-log-epoch-interval",
@@ -259,6 +306,18 @@ def _parse_args() -> argparse.Namespace:
         "--no-loss-log",
         action="store_true",
         help="不写入训练 loss CSV",
+    )
+    p.add_argument(
+        "--checkpoint-save-interval",
+        type=int,
+        default=500,
+        metavar="N",
+        help="每 N 个 epoch 另存一份 checkpoint（默认 500，0=关闭）",
+    )
+    p.add_argument(
+        "--no-periodic-checkpoint",
+        action="store_true",
+        help="关闭按 epoch 间隔保存（仍会在结束/中断时保存）",
     )
     p.add_argument(
         "--friction-label",
@@ -325,13 +384,39 @@ def _freeze_friction_branch(model: MystericNet) -> int:
 
 
 def _build_optimizer(
-    model: MystericNet, *, lr: float, phase: TrainPhase
+    model: MystericNet,
+    *,
+    lr: float,
+    phase: TrainPhase,
+    lnet_lr: float | None = None,
 ) -> torch.optim.Adam:
+    """阶段 1 联合：lr 用于 hnet（摩擦），lnet_lr 用于 L-Net（可选更小）。"""
+    wd = 1e-5
     if phase == "lnet":
-        params = model.lnet.parameters()
-    else:
-        params = [p for p in model.parameters() if p.requires_grad]
-    return torch.optim.Adam(params, lr=lr, weight_decay=1e-5, amsgrad=True)
+        return torch.optim.Adam(
+            (p for p in model.lnet.parameters() if p.requires_grad),
+            lr=lr,
+            weight_decay=wd,
+            amsgrad=True,
+        )
+    lnet_lr_eff = float(lr if lnet_lr is None else lnet_lr)
+    hnet_params = [p for p in model.hnet.parameters() if p.requires_grad]
+    lnet_params = [p for p in model.lnet.parameters() if p.requires_grad]
+    if lnet_lr_eff == lr or not (hnet_params and lnet_params):
+        return torch.optim.Adam(
+            hnet_params + lnet_params,
+            lr=lr,
+            weight_decay=wd,
+            amsgrad=True,
+        )
+    return torch.optim.Adam(
+        [
+            {"params": hnet_params, "lr": lr},
+            {"params": lnet_params, "lr": lnet_lr_eff},
+        ],
+        weight_decay=wd,
+        amsgrad=True,
+    )
 
 
 def _effective_fri_loss(args: argparse.Namespace) -> str:
@@ -436,44 +521,99 @@ def main() -> None:
             print(f"  GMS: blocks={args.gms_n_blocks}  dt={gms_dt:g} s（CLI 指定）")
         args._gms_dt_resolved = gms_dt
 
-    model = MystericNet(
-        dof=n_dof,
-        seq_len=args.seq_len,
-        lnet_hidden=l_w,
-        lnet_layers=l_d,
-        friction_backend=args.friction_backend,
-        fo_mlp_hidden_dim=args.fo_mlp_hidden,
-        gms_n_blocks=args.gms_n_blocks,
-        gms_dt=gms_dt if args.friction_backend in ("gms", "gms_pinn") else 0.001,
-    ).to(device)
-
-    eff_fri = _effective_fri_loss(args)
-    if args.friction_backend in ("gms", "gms_pinn"):
-        if args.fri_loss == "smape" and eff_fri == "mse":
-            print("  提示: gms 下 SMAPE 对 l_fri 易饱和≈2，已自动改用 fri_loss=mse。")
-        if hasattr(model.hnet, "gms"):
-            n_init = min(4096, qdi.shape[0])
-            warmstart_gms_from_samples(
-                model.hnet.gms, qdi[:n_init], tau_fri_t[:n_init]
+    resume_ckpt: dict | None = None
+    start_epoch = 1
+    if args.resume is not None:
+        if not args.resume.is_file():
+            raise SystemExit(f"续训 checkpoint 不存在: {args.resume}")
+        model, resume_ckpt = _load_mysteric_checkpoint(args.resume, device)
+        if int(model.dof) != n_dof:
+            raise SystemExit(
+                f"checkpoint n_dof={model.dof} 与数据 n_dof={n_dof} 不一致: {args.resume}"
             )
-            print(f"  已 warm-start GMS 极限面 v_a（N={n_init}）。")
-
-    if args.friction_backend == "stribeck":
-        if args.fri_loss == "smape" and eff_fri == "mse":
-            print("  提示: stribeck 下 SMAPE 对 l_fri 易饱和≈2，已自动改用 fri_loss=mse。")
-        if hasattr(model.hnet, "scv"):
-            n_init = min(4096, qdi.shape[0])
-            warmstart_scv_from_samples(
-                model.hnet.scv, qdi[:n_init], tau_fri_t[:n_init]
+        ckpt_backend = resume_ckpt.get("friction_backend")
+        if ckpt_backend is not None and str(ckpt_backend) != args.friction_backend:
+            print(
+                f"  警告: CLI friction-backend={args.friction_backend!r} 与 "
+                f"checkpoint={ckpt_backend!r} 不一致，以 CLI 为准但权重可能不匹配。"
             )
-            print(f"  已 warm-start SCV（k_c/k_s，N={n_init}）。")
+        start_epoch = _resume_start_epoch(resume_ckpt, args.resume)
+        l_w = int(resume_ckpt.get("lnet_hidden", l_w))
+        l_d = int(resume_ckpt.get("lnet_layers", l_d))
+        if resume_ckpt.get("seq_len") is not None:
+            ckpt_seq = int(resume_ckpt["seq_len"])
+            if ckpt_seq != args.seq_len:
+                print(
+                    f"  警告: checkpoint seq_len={ckpt_seq}，CLI seq_len={args.seq_len}，"
+                    "以 CLI 为准。"
+                )
+        print(
+            f"续训: 已加载 {args.resume.resolve()}，"
+            f"从 epoch {start_epoch} 训练到 {int(args.epochs)}"
+        )
+    else:
+        model = MystericNet(
+            dof=n_dof,
+            seq_len=args.seq_len,
+            lnet_hidden=l_w,
+            lnet_layers=l_d,
+            friction_backend=args.friction_backend,
+            fo_mlp_hidden_dim=args.fo_mlp_hidden,
+            gms_n_blocks=args.gms_n_blocks,
+            gms_dt=gms_dt if args.friction_backend in ("gms", "gms_pinn") else 0.001,
+        ).to(device)
+
+        eff_fri = _effective_fri_loss(args)
+        if args.friction_backend in ("gms", "gms_pinn"):
+            if args.fri_loss == "smape" and eff_fri == "mse":
+                print("  提示: gms 下 SMAPE 对 l_fri 易饱和≈2，已自动改用 fri_loss=mse。")
+            if hasattr(model.hnet, "gms"):
+                n_init = min(4096, qdi.shape[0])
+                warmstart_gms_from_samples(
+                    model.hnet.gms, qdi[:n_init], tau_fri_t[:n_init]
+                )
+                print(f"  已 warm-start GMS 极限面 v_a（N={n_init}）。")
+
+        if args.friction_backend == "stribeck":
+            if args.fri_loss == "smape" and eff_fri == "mse":
+                print("  提示: stribeck 下 SMAPE 对 l_fri 易饱和≈2，已自动改用 fri_loss=mse。")
+            if hasattr(model.hnet, "scv"):
+                n_init = min(4096, qdi.shape[0])
+                warmstart_scv_from_samples(
+                    model.hnet.scv, qdi[:n_init], tau_fri_t[:n_init]
+                )
+                print(f"  已 warm-start SCV（k_c/k_s，N={n_init}）。")
 
     stage1_ep, stage2_ep, total_ep = _resolve_stage_epochs(args)
     args._stage1_epochs = stage1_ep
-    stage1_lr = float(args.lr)
+    if start_epoch > total_ep:
+        raise SystemExit(
+            f"续训起点 epoch={start_epoch} 已超过 --epochs={total_ep}，"
+            "请增大 --epochs 或换更早的 checkpoint。"
+        )
+    stage1_hnet_lr = float(args.lr)
+    stage1_lnet_lr = (
+        float(args.lnet_lr) if args.lnet_lr is not None else stage1_hnet_lr
+    )
     stage2_lr = float(args.stage2_lr if args.stage2_lr is not None else args.lr)
-    phase: TrainPhase = "joint"
-    opt = _build_optimizer(model, lr=stage1_lr, phase=phase)
+    if start_epoch > stage1_ep and stage2_ep > 0:
+        phase = "lnet"
+        _freeze_friction_branch(model)
+        opt = _build_optimizer(model, lr=stage2_lr, phase=phase)
+        if args.resume is not None:
+            print(
+                f"  续训处于阶段 2 [S2-L]：hnet 已冻结，L-Net 拟合 τ_meas−τ_fri。"
+            )
+    else:
+        phase = "joint"
+        opt = _build_optimizer(
+            model,
+            lr=stage1_hnet_lr,
+            phase=phase,
+            lnet_lr=stage1_lnet_lr if args.lnet_lr is not None else None,
+        )
+
+    eff_fri = _effective_fri_loss(args)
 
     N = qi.shape[0]
     B = args.batch
@@ -481,6 +621,9 @@ def main() -> None:
     w_E = float(args.energy_loss_weight)
     use_energy = bool(args.energy_loss)
     loss_interval = max(1, int(args.loss_log_epoch_interval))
+    ckpt_interval = max(0, int(args.checkpoint_save_interval))
+    periodic_ckpt = ckpt_interval > 0 and not args.no_periodic_checkpoint
+    checkpoints_dir = args.save.parent
 
     print(
         f"device={device}  n_dof={n_dof}  friction={args.friction_backend}  "
@@ -495,12 +638,35 @@ def main() -> None:
         + (f" (CLI={args.fri_loss})" if eff_fri != args.fri_loss else "")
         + f"  train N={N}  test N={test_qp.shape[0]}\n"
         + (
-            f"  两阶段: 1..{stage1_ep} 联合(lr={stage1_lr:g})"
-            f" → {stage1_ep + 1}..{total_ep} 仅 L-Net(lr={stage2_lr:g}, τ_target=τ−τ_fri)\n"
+            f"  两阶段: 1..{stage1_ep} 联合(hnet lr={stage1_hnet_lr:g}"
+            + (
+                f", lnet lr={stage1_lnet_lr:g})"
+                if args.lnet_lr is not None
+                else ")"
+            )
+            + f" → {stage1_ep + 1}..{total_ep} 仅 L-Net(lr={stage2_lr:g}, τ_target=τ−τ_fri)\n"
             if stage2_ep > 0
-            else f"  单阶段联合训练，共 {total_ep} epoch，lr={stage1_lr:g}\n"
+            else (
+                f"  单阶段联合训练，共 {total_ep} epoch，hnet lr={stage1_hnet_lr:g}"
+                + (
+                    f", lnet lr={stage1_lnet_lr:g}\n"
+                    if args.lnet_lr is not None
+                    else f"\n"
+                )
+            )
+        )
+        + (
+            f"  续训: epoch {start_epoch}..{total_ep}\n"
+            if args.resume is not None
+            else ""
         )
         + f"  checkpoint → {args.save.resolve()}\n"
+        + (
+            f"  周期保存 → {checkpoints_dir}/"
+            f"{args.friction_backend}_net_epochNNNNN.pt（每 {ckpt_interval} epoch）\n"
+            if periodic_ckpt
+            else "  周期保存: 已关闭\n"
+        )
         + (
             f"  loss CSV → {loss_csv_path.resolve()}（每 {loss_interval} epoch）\n"
             if not args.no_loss_log
@@ -525,7 +691,7 @@ def main() -> None:
             _write_loss_csv(loss_csv_path, loss_rows)
 
     try:
-        for epoch in range(1, total_ep + 1):
+        for epoch in range(start_epoch, total_ep + 1):
             last_epoch = epoch
             new_phase = _phase_at_epoch(epoch, stage1_ep)
             if new_phase != phase:
@@ -688,6 +854,23 @@ def main() -> None:
                     print(
                         "  提示: w_fri 过小，摩擦项对总损失贡献弱；SMAPE 摩擦下建议 --friction-loss-weight 1.0。"
                     )
+
+            if periodic_ckpt and epoch % ckpt_interval == 0:
+                periodic_path = _net_checkpoint_path(
+                    args.friction_backend,
+                    epoch=epoch,
+                    checkpoints_dir=checkpoints_dir,
+                )
+                _save_checkpoint(
+                    periodic_path,
+                    model,
+                    n_dof=n_dof,
+                    args=args,
+                    l_w=l_w,
+                    l_d=l_d,
+                    epoch=epoch,
+                    interrupted=False,
+                )
 
     except KeyboardInterrupt:
         print(f"\n训练被中断 (Ctrl+C)，保存 epoch={last_epoch} 的权重 …", flush=True)
