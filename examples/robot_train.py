@@ -113,6 +113,7 @@ def _checkpoint_payload(
         "smape_eps": args.smape_eps,
         "data_path": str(args.data.resolve()),
         "fo_mlp_hidden_dim": args.fo_mlp_hidden,
+        "fo_tcn_layers": args.fo_tcn_layers,
         "gms_n_blocks": args.gms_n_blocks,
         "gms_n_elements": args.gms_n_blocks,
         "gms_dt": getattr(args, "_gms_dt_resolved", args.gms_dt),
@@ -194,6 +195,14 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         metavar="D",
         help="fo_cascade 两层 MLP 隐层宽度，默认 max(4*n_dof, 16)",
+    )
+    p.add_argument(
+        "--fo-tcn-layers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="fo_cascade / fo_cascade_pinn 中 TCN₁ 与 TCN₂ 层数；"
+        "默认 fo_cascade=2、fo_cascade_pinn=3",
     )
     p.add_argument(
         "--gms-blocks",
@@ -559,6 +568,7 @@ def main() -> None:
             lnet_layers=l_d,
             friction_backend=args.friction_backend,
             fo_mlp_hidden_dim=args.fo_mlp_hidden,
+            fo_tcn_layers=args.fo_tcn_layers,
             gms_n_blocks=args.gms_n_blocks,
             gms_dt=gms_dt if args.friction_backend in ("gms", "gms_pinn") else 0.001,
         ).to(device)

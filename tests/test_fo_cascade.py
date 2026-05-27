@@ -39,6 +39,7 @@ def test_build_stribeck_mlp_returns_two_layer() -> None:
 def test_fo_cascade_pinn_returns_physics() -> None:
     dof, L, B = 2, 30, 3
     net = HNetFOCascadePINN(dof=dof, seq_len=L)
+    assert net.tcn_layers == 3
     q_seq = torch.randn(B, L, dof)
     qd_seq = torch.randn(B, L, dof)
     tau_pred, tau_phys = net(q_seq, qd_seq)

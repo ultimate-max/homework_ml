@@ -129,6 +129,7 @@ class HNetFOCascade(nn.Module):
         super().__init__()
         self.dof = dof
         self.seq_len = seq_len
+        self.tcn_layers = tcn_layers
         mlp_h = mlp_hidden if mlp_hidden is not None else max(4 * dof, 16)
         self.mlp_hidden = mlp_h
 
@@ -220,12 +221,13 @@ class HNetFOCascadePINN(nn.Module):
         hidden_channels: int = 8,
         kernel_size: int = 3,
         *,
-        tcn_layers: int = 2,
+        tcn_layers: int = 3,
         mlp_hidden: int | None = None,
     ) -> None:
         super().__init__()
         self.dof = dof
         self.seq_len = seq_len
+        self.tcn_layers = tcn_layers
         self.fo = HNetFOCascade(
             dof,
             seq_len=seq_len,

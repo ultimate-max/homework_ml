@@ -56,6 +56,20 @@ def _infer_fo_mlp_hidden_dim(state: dict, dof: int) -> int | None:
     return None
 
 
+def _infer_fo_tcn_layers(state: dict) -> int | None:
+    """从 fo_cascade TCN₁ 的 causal conv 层数推断 tcn_layers。"""
+    for prefix in ("hnet.fo.tcn_diff.net", "hnet.tcn_diff.net"):
+        conv_indices: list[int] = []
+        for k in state:
+            if k.startswith(prefix + ".") and k.endswith(".conv.weight"):
+                idx_s = k[len(prefix) + 1 :].split(".", 1)[0]
+                if idx_s.isdigit():
+                    conv_indices.append(int(idx_s))
+        if conv_indices:
+            return len(conv_indices)
+    return None
+
+
 def _infer_pinn_hidden(state: dict, dof: int) -> tuple[int, ...]:
     """从 checkpoint 的 Linear 层推断 MLP 隐层宽度（不含输出层 dof）。"""
     widths: list[int] = []
@@ -202,6 +216,13 @@ def load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[Mysteric
             inferred = _infer_fo_mlp_hidden_dim(state, dof)
             if inferred is not None:
                 kw["fo_mlp_hidden_dim"] = inferred
+        tcn_n = ckpt.get("fo_tcn_layers")
+        if tcn_n is not None:
+            kw["fo_tcn_layers"] = int(tcn_n)
+        else:
+            inferred_tcn = _infer_fo_tcn_layers(state)
+            if inferred_tcn is not None:
+                kw["fo_tcn_layers"] = inferred_tcn
     if "mass_diag_eps" in ckpt:
         eps = float(ckpt["mass_diag_eps"])
         kw["mass_diag_eps"] = eps

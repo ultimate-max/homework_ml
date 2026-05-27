@@ -300,7 +300,7 @@ python examples/robot_train.py \
 |----------------------|------|
 | `tcn` | 时序卷积（原 Mysteric-Net 论文） |
 | `fo_cascade` | TCN₁([q,q̇])→**两层 tanh MLP**→TCN₂，对齐 Xun 图 4 简化版 |
-| `fo_cascade_pinn` | fo_cascade + SCV，`friction_pinn_loss`（Hu 等 PINN，$\lambda$=`--lambda-physics`） |
+| `fo_cascade_pinn` | fo_cascade + SCV，`friction_pinn_loss`（Hu 等 PINN，$\lambda$=`--lambda-physics`）；**TCN 默认 3 层**（`fo_cascade` 为 2 层） |
 | `stribeck` | 可学习 SCV 物理模型（**仅** $\dot q$，无 MLP/TCN）；见下文 **§3.2.1** |
 | `stribeck_pinn` | MLP + SCV 物理损失（Hu 等 PINN） |
 | `gms` | 可学习 **GMS** 物理模型（$N$ 并联 stick/slip + $\sigma_1 v$，对 `qd_seq` 窗内积分）；见 **§3.2.2** |
@@ -604,6 +604,7 @@ python examples/motor_identify_train.py \
 | `--lr` | `5e-4` | 阶段 1 学习率 |
 | `--seq-len` | `20` | 摩擦网络滑窗长度 |
 | `--fo-mlp-hidden` | 自动 | fo_cascade 两层 MLP 隐层宽度，默认 `max(4*n_dof, 16)` |
+| `--fo-tcn-layers` | 自动 | TCN₁/TCN₂ 层数；`fo_cascade`=2，`fo_cascade_pinn`=3 |
 | `--lnet-width` / `--lnet-depth` | `32` / `2` | L-Net 规模 |
 | `--lnet-mass-eps` | `1e-2` | $H$ 对角初值/数值脊 |
 | `--lambda-physics` | `0.5` | PINN 摩擦物理项权重 $\lambda$ |

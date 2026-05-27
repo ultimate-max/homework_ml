@@ -57,6 +57,7 @@ class MystericNet(nn.Module):
         gms_n_elements: int = 3,
         gms_dt: float = 0.001,
         fo_mlp_hidden_dim: int | None = None,
+        fo_tcn_layers: int | None = None,
         lnet_zero_cg: bool = False,
     ) -> None:
         super().__init__()
@@ -83,6 +84,7 @@ class MystericNet(nn.Module):
                 seq_len=seq_len,
                 hidden_channels=hnet_channels,
                 kernel_size=hnet_kernel,
+                tcn_layers=fo_tcn_layers if fo_tcn_layers is not None else 2,
                 mlp_hidden=fo_mlp_hidden_dim,
             )
         elif friction_backend == "fo_cascade_pinn":
@@ -91,6 +93,7 @@ class MystericNet(nn.Module):
                 seq_len=seq_len,
                 hidden_channels=hnet_channels,
                 kernel_size=hnet_kernel,
+                tcn_layers=fo_tcn_layers if fo_tcn_layers is not None else 3,
                 mlp_hidden=fo_mlp_hidden_dim,
             )
         elif friction_backend == "stribeck":
