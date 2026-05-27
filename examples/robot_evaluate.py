@@ -69,12 +69,110 @@ def _infer_pinn_hidden(state: dict, dof: int) -> tuple[int, ...]:
     return tuple(widths) if widths else (128, 64)
 
 
+def _infer_friction_backend(state: dict) -> str | None:
+    """从 state_dict 键名推断摩擦后端（checkpoint 未写 friction_backend 时用）。"""
+    keys = list(state.keys())
+    if any(k.startswith("hnet.tcn.") for k in keys) and "hnet.head.weight" in state:
+        return "tcn"
+    if any(k.startswith("hnet.fo.") for k in keys):
+        if any(k.startswith("hnet.scv.") for k in keys):
+            return "fo_cascade_pinn"
+        return "fo_cascade"
+    if any(k.startswith("hnet.gms.") for k in keys):
+        if any(k.startswith("hnet.mlp.") for k in keys):
+            return "gms_pinn"
+        return "gms"
+    if any(k.startswith("hnet.scv.") for k in keys):
+        if any(k.startswith("hnet.mlp.") for k in keys):
+            return "stribeck_pinn"
+        return "stribeck"
+    if any(k.startswith("hnet.mlp.") for k in keys):
+        return "stribeck_pinn"
+    return None
+
+
+def _infer_tcn_channels(state: dict) -> int:
+    w = state.get("hnet.tcn.0.weight")
+    if w is not None:
+        return int(w.shape[0])
+    return 8
+
+
+def _resolve_dof(state: dict, ckpt: dict) -> int:
+    """从 L-Net / H-Net 权重一致推断 n_dof（避免仅用错误的 ckpt['dof']）。"""
+    w0 = state["lnet.layers.0.weight"]
+    candidates: list[tuple[str, int]] = [("lnet.layers.0", int(w0.shape[1]))]
+    head_w = state.get("hnet.head.weight")
+    if head_w is not None:
+        candidates.append(("hnet.head", int(head_w.shape[0])))
+    tcn_w = state.get("hnet.tcn.0.weight")
+    if tcn_w is not None:
+        in_ch = int(tcn_w.shape[1])
+        if in_ch % 2 != 0:
+            raise ValueError(f"hnet.tcn.0 输入通道 {in_ch} 不是 2*n_dof")
+        candidates.append(("hnet.tcn", in_ch // 2))
+    scv_kv = state.get("hnet.scv.log_k_v")
+    if scv_kv is not None:
+        candidates.append(("hnet.scv", int(scv_kv.shape[0])))
+    for gms_key in ("hnet.gms.log_sigma_1", "hnet.gms.log_v_a"):
+        gms_p = state.get(gms_key)
+        if gms_p is not None:
+            candidates.append(("hnet.gms", int(gms_p.shape[0])))
+            break
+
+    dof = candidates[0][1]
+    mism = [(n, v) for n, v in candidates if v != dof]
+    if mism:
+        detail = ", ".join(f"{n}={v}" for n, v in candidates)
+        raise ValueError(f"checkpoint 内各模块 dof 不一致: {detail}")
+
+    ckpt_dof = ckpt.get("dof")
+    if ckpt_dof is not None and int(ckpt_dof) != dof:
+        print(
+            f"  提示: checkpoint 元数据 dof={int(ckpt_dof)}，"
+            f"与权重推断 dof={dof} 不一致，已按权重加载。"
+        )
+    return dof
+
+
+def _extract_state_dict(ckpt: object, path: Path) -> dict:
+    """兼容 robot_train（state_dict）与 synthetic_train（model_state_dict）等格式。"""
+    if not isinstance(ckpt, dict):
+        raise ValueError(f"checkpoint 须为 dict: {path}")
+    for key in ("state_dict", "model_state_dict"):
+        state = ckpt.get(key)
+        if isinstance(state, dict) and state:
+            return state
+    if any(str(k).startswith(("lnet.", "hnet.")) for k in ckpt):
+        return ckpt  # type: ignore[return-value]
+    keys = ", ".join(sorted(ckpt.keys()))
+    raise KeyError(
+        f"checkpoint 中无 state_dict / model_state_dict，且不是裸权重 dict。"
+        f" 路径={path}  keys=[{keys}]"
+    )
+
+
 def load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[MystericNet, dict]:
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    state = ckpt["state_dict"]
-    dof = int(ckpt["dof"])
+    if not isinstance(ckpt, dict):
+        raise ValueError(f"checkpoint 须为 dict: {path}")
+    state = _extract_state_dict(ckpt, path)
+    w0 = state.get("lnet.layers.0.weight")
+    if w0 is None:
+        raise KeyError(f"checkpoint 缺少 lnet.layers.0.weight: {path}")
+    dof = _resolve_dof(state, ckpt)
     seq_len = int(ckpt.get("seq_len", 30))
-    backend = ckpt.get("friction_backend", "stribeck_pinn")
+    inferred_backend = _infer_friction_backend(state)
+    ckpt_backend = ckpt.get("friction_backend")
+    if inferred_backend is not None:
+        backend = inferred_backend
+        if ckpt_backend is not None and str(ckpt_backend) != backend:
+            print(
+                f"  提示: checkpoint 标注 friction_backend={ckpt_backend!r}，"
+                f"但权重结构似为 {backend!r}，已按权重加载。"
+            )
+    else:
+        backend = str(ckpt_backend or "stribeck_pinn")
     l_w = int(ckpt.get("lnet_hidden", _infer_lnet_hyper(state)[0]))
     l_d = int(ckpt.get("lnet_layers", _infer_lnet_hyper(state)[1]))
     kw: dict = dict(
@@ -84,6 +182,10 @@ def load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[Mysteric
         lnet_layers=l_d,
         friction_backend=backend,
     )
+    if backend == "tcn":
+        kw["hnet_channels"] = int(ckpt.get("hnet_channels", _infer_tcn_channels(state)))
+        if "hnet_kernel" in ckpt:
+            kw["hnet_kernel"] = int(ckpt["hnet_kernel"])
     if backend in ("gms", "gms_pinn"):
         n_blk = ckpt.get("gms_n_blocks", ckpt.get("gms_n_elements"))
         if n_blk is not None:
@@ -342,6 +444,15 @@ def main() -> None:
     seq_len = int(args.seq_len or ckpt.get("seq_len", 30))
 
     raw = load_pickle_trajectories(str(args.data))
+    data_n_dof = int(np.asarray(raw["qp"][0]).shape[1])
+    if model.dof != data_n_dof:
+        raise SystemExit(
+            f"checkpoint 为 n_dof={model.dof}（{args.checkpoint}），"
+            f"但数据 {args.data} 为 n_dof={data_n_dof}，无法评估。\n"
+            f"请使用与数据同自由度的权重（例如 robot_fric 6 轴应用 "
+            f"checkpoints/mysteric_robot.pt 或 stribeck_net.pt 等）。"
+        )
+
     data, traj_labels, divider = build_test_tensors(raw, list(args.test_labels), seq_len, device)
     pred = predict(model, data, device)
 
