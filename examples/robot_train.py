@@ -51,6 +51,7 @@ from RobotDynamics.FrictionModule import (
 from RobotDynamics.MystericNet import MystericNet
 
 PHYSICS_ONLY_FRICTION = frozenset({"stribeck", "gms"})
+SCV_FRICTION_BACKENDS = frozenset({"stribeck", "stribeck_pinn", "fo_cascade_pinn"})
 TrainPhase = Literal["joint", "lnet", "friction"]
 
 
@@ -627,12 +628,19 @@ def main() -> None:
         if args.friction_backend == "stribeck":
             if args.fri_loss == "smape" and eff_fri == "mse":
                 print("  提示: stribeck 下 SMAPE 对 l_fri 易饱和≈2，已自动改用 fri_loss=mse。")
-            if hasattr(model.hnet, "scv"):
-                n_init = min(4096, qdi.shape[0])
-                warmstart_scv_from_samples(
-                    model.hnet.scv, qdi[:n_init], tau_fri_t[:n_init]
-                )
-                print(f"  已 warm-start SCV（k_c/k_s，N={n_init}）。")
+
+        if args.friction_backend in SCV_FRICTION_BACKENDS and hasattr(model.hnet, "scv"):
+            n_init = min(4096, qdi.shape[0])
+            n_joints = warmstart_scv_from_samples(
+                model.hnet.scv, qdi[:n_init], tau_fri_t[:n_init]
+            )
+            c = model.hnet.scv.positive_coefficients()
+            print(
+                f"  已 warm-start SCV（{n_joints}/{n_dof} 关节，N={n_init}）："
+                f"k_c≈{float(c['k_c'].median()):.3g}  "
+                f"k_s≈{float(c['k_s'].median()):.3g}  "
+                f"k_v≈{float(c['k_v'].median()):.3g}"
+            )
 
     stage1_ep, stage2_ep, stage3_ep, total_ep = _resolve_stage_epochs(args)
     args._stage1_epochs = stage1_ep

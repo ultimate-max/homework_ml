@@ -114,10 +114,10 @@ $$
 
 | 参数 | 默认初值（约） | 含义 |
 |------|----------------|------|
-| $k_v$ | 0.01 | 粘性 |
-| $k_c$ | 0.1 | 库仑 |
+| $k_v$ | 0.1 | 粘性 |
+| $k_c$ | 2.0 | 库仑（6 轴 `robot_fric` 量级；新训练自动 warm-start 会按数据覆盖） |
 | $k_a$ | 10 | $\tanh$ 在零速附近的陡度 |
-| $\Delta k_s$ | 0.05 → $k_s=k_c+\Delta k_s\approx 0.15$ | Stribeck 静摩擦超额（相对 $k_c$） |
+| $\Delta k_s$ | 0.1 → $k_s=k_c+\Delta k_s\approx 2.1$ | Stribeck 静摩擦超额 |
 | $v_s$ | 0.05 | Stribeck 特征速度 |
 | $\alpha$ | 1.5 | Stribeck 曲线指数 |
 

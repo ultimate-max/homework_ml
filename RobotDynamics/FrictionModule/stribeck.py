@@ -38,6 +38,16 @@ def _init_log_positive(target: float, floor: float = _POS_FLOOR) -> float:
     return _scalar_positive_inv(target, floor=floor)
 
 
+_SCV_DEFAULTS = {
+    "k_v": 0.1,
+    "k_c": 2.0,
+    "k_a": 10.0,
+    "delta_k_s": 0.1,
+    "v_s": 0.05,
+    "alpha": 1.5,
+}
+
+
 class StribeckSCVParams(nn.Module):
     """
     每关节可学习 SCV 参数。
@@ -46,15 +56,19 @@ class StribeckSCVParams(nn.Module):
     故 **k_s = k_c + Δk_s ≥ k_c** 在参数化上恒成立。
     """
 
-    def __init__(self, dof: int, *, init_v_s: float = 0.05, init_alpha: float = 1.5) -> None:
+    def __init__(self, dof: int, *, init_v_s: float | None = None, init_alpha: float | None = None) -> None:
         super().__init__()
         self.dof = dof
-        self.log_k_v = nn.Parameter(torch.full((dof,), _init_log_positive(0.01)))
-        self.log_k_c = nn.Parameter(torch.full((dof,), _init_log_positive(0.1)))
-        self.log_k_a = nn.Parameter(torch.full((dof,), _init_log_positive(10.0)))
-        self.log_delta_k_s = nn.Parameter(torch.full((dof,), _init_log_positive(0.05)))
-        self.log_v_s = nn.Parameter(torch.full((dof,), _init_log_positive(init_v_s)))
-        self.log_alpha = nn.Parameter(torch.full((dof,), _init_log_positive(init_alpha)))
+        v_s0 = _SCV_DEFAULTS["v_s"] if init_v_s is None else init_v_s
+        alpha0 = _SCV_DEFAULTS["alpha"] if init_alpha is None else init_alpha
+        self.log_k_v = nn.Parameter(torch.full((dof,), _init_log_positive(_SCV_DEFAULTS["k_v"])))
+        self.log_k_c = nn.Parameter(torch.full((dof,), _init_log_positive(_SCV_DEFAULTS["k_c"])))
+        self.log_k_a = nn.Parameter(torch.full((dof,), _init_log_positive(_SCV_DEFAULTS["k_a"])))
+        self.log_delta_k_s = nn.Parameter(
+            torch.full((dof,), _init_log_positive(_SCV_DEFAULTS["delta_k_s"]))
+        )
+        self.log_v_s = nn.Parameter(torch.full((dof,), _init_log_positive(v_s0)))
+        self.log_alpha = nn.Parameter(torch.full((dof,), _init_log_positive(alpha0)))
 
     def positive_coefficients(self) -> dict[str, torch.Tensor]:
         """返回正参数 dict：k_v, k_c, k_a, k_s, v_s, alpha（每关节 1D）。"""
@@ -108,15 +122,25 @@ def warmstart_scv_from_samples(
     tau_fri: torch.Tensor,
     *,
     qd_min: float = 0.02,
+    qd_viscous_min: float = 0.15,
     k_c_floor: float = 0.05,
-    k_s_margin: float = 0.05,
-) -> None:
-    """用 ``median(|τ_fri|)``（``|q̇|>qd_min``）粗估 ``k_c`` 与 ``k_s = k_c + margin``。"""
+    k_s_margin_frac: float = 0.05,
+    k_v_frac_of_kc: float = 0.05,
+    k_v_floor: float = 1e-4,
+) -> int:
+    """
+    用训练样本粗估 SCV：``k_c ≈ median(|τ_fri|)``（``|q̇|>qd_min``），
+    ``Δk_s = max(5%·k_c, 0.02)``，``k_v`` 由高速段 ``|τ_fri/q̇|`` 上限截断。
+
+    Returns:
+        成功初始化参数的关节数。
+    """
     if qd.shape != tau_fri.shape or qd.ndim != 2:
         raise ValueError(f"qd {qd.shape} 与 tau_fri {tau_fri.shape} 须同为 (N, dof)")
     dof = scv.dof
     if qd.shape[1] != dof:
         raise ValueError(f"Expected dof {dof}, got qd {qd.shape[1]}")
+    n_set = 0
     with torch.no_grad():
         for j in range(dof):
             mask = qd[:, j].abs() > qd_min
@@ -124,7 +148,19 @@ def warmstart_scv_from_samples(
                 continue
             est = float(tau_fri[mask, j].abs().median().clamp(min=k_c_floor))
             scv.log_k_c[j] = _scalar_positive_inv(est)
-            scv.log_delta_k_s[j] = _scalar_positive_inv(k_s_margin)
+            margin = max(est * k_s_margin_frac, 0.02)
+            scv.log_delta_k_s[j] = _scalar_positive_inv(margin)
+
+            mask_v = qd[:, j].abs() > qd_viscous_min
+            if int(mask_v.sum()) >= 8:
+                kv = float(
+                    (tau_fri[mask_v, j].abs() / qd[mask_v, j].abs())
+                    .median()
+                    .clamp(min=k_v_floor, max=est * max(k_v_frac_of_kc, 0.01))
+                )
+                scv.log_k_v[j] = _scalar_positive_inv(kv)
+            n_set += 1
+    return n_set
 
 
 def cv_torque(

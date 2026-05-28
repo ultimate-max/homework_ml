@@ -3,7 +3,26 @@
 import torch
 
 from RobotDynamics.FrictionModule import HNetStribeck, HNetStribeckPINN, StribeckSCVParams, scv_torque
-from RobotDynamics.FrictionModule.stribeck import _init_log_positive
+from RobotDynamics.FrictionModule.stribeck import _init_log_positive, warmstart_scv_from_samples
+
+
+def test_scv_default_scale() -> None:
+    scv = StribeckSCVParams(6)
+    c = scv.positive_coefficients()
+    assert float(c["k_c"].median()) >= 1.5
+    assert float(c["k_s"].median()) >= float(c["k_c"].median())
+
+
+def test_warmstart_scv_from_samples() -> None:
+    scv = StribeckSCVParams(2)
+    torch.manual_seed(0)
+    qd = torch.randn(16, 2) * 0.5
+    tau = qd * 2.0 + 0.1 * torch.randn(16, 2)
+    n = warmstart_scv_from_samples(scv, qd, tau)
+    assert n == 2
+    c = scv.positive_coefficients()
+    assert torch.all(c["k_s"] >= c["k_c"] - 1e-9)
+    assert float(c["k_c"].min()) > 0.05
 
 
 def test_scv_k_s_ge_k_c() -> None:
