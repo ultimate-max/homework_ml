@@ -24,9 +24,9 @@ class StribeckSCVParams(nn.Module):
     def __init__(self, dof: int, *, init_v_s: float = 0.05, init_alpha: float = 1.5) -> None:
         super().__init__()
         self.dof = dof
-        self.log_k_v = nn.Parameter(torch.full((dof,), math.log(0.01)))
-        self.log_k_c = nn.Parameter(torch.full((dof,), math.log(0.1)))
-        self.log_k_a = nn.Parameter(torch.full((dof,), math.log(10.0)))
+        self.log_k_v = nn.Parameter(torch.full((dof,), math.log(10)))
+        self.log_k_c = nn.Parameter(torch.full((dof,), math.log(10)))
+        self.log_k_a = nn.Parameter(torch.full((dof,), math.log(100.0)))
         self.log_k_s = nn.Parameter(torch.full((dof,), math.log(0.15)))
         self.log_v_s = nn.Parameter(torch.full((dof,), math.log(init_v_s)))
         self.log_alpha = nn.Parameter(torch.full((dof,), math.log(init_alpha)))
@@ -74,7 +74,7 @@ def cv_torque(
     k_c: torch.Tensor,
     k_a: torch.Tensor,
 ) -> torch.Tensor:
-    """Coulomb-viscous, Eq. (3). 参数 shape (dof,) 广播到 batch。"""
+    """Coulomb-viscous，符号约定与 (tau - m - c - g) 一致。"""
     return k_v * qd + k_c * torch.tanh(k_a * qd)
 
 
@@ -87,7 +87,7 @@ def scv_torque(
     v_s: torch.Tensor,
     alpha: torch.Tensor,
 ) -> torch.Tensor:
-    """Stribeck-Coulomb-viscous, Eq. (4)."""
+    """Stribeck-Coulomb-viscous，符号约定与 (tau - m - c - g) 一致。"""
     coulomb = k_c * torch.tanh(k_a * qd)
     viscous = k_v * qd
     ratio = torch.abs(qd / v_s.unsqueeze(0).clamp_min(1e-8))
