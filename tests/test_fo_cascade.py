@@ -11,6 +11,9 @@ def test_fo_cascade_shapes_and_causality() -> None:
     qd_seq = torch.randn(B, L, dof)
     tau = net(q_seq, qd_seq)
     assert tau.shape == (B, dof)
+    qd_t = qd_seq[:, -1, :]
+    mask = qd_t.abs() > 0.01
+    assert torch.all((tau * qd_t)[mask] >= -1e-6)
 
     tau2, v_last, s_last, s_raw_last, v_seq = net.forward_with_internals(q_seq, qd_seq)
     assert tau2.shape == (B, dof)

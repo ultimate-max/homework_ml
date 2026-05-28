@@ -335,24 +335,12 @@ def print_scv_params(model: MystericNet) -> None:
         return
     scv = hnet.scv
     names = ("k_v", "k_c", "k_a", "k_s", "v_s", "alpha")
-    logs = (
-        scv.log_k_v,
-        scv.log_k_c,
-        scv.log_k_a,
-        scv.log_k_s,
-        scv.log_v_s,
-        scv.log_alpha,
-    )
+    coeffs = scv.positive_coefficients()
     print("\n学到的 SCV 参数（每关节）:")
     hdr = "joint  " + "  ".join(f"{n:>8}" for n in names)
     print(hdr)
     for j in range(scv.dof):
-        vals = []
-        for name, log_p in zip(names, logs):
-            v = torch.nn.functional.softplus(log_p[j]).item()
-            if name == "alpha":
-                v = max(v, 0.5)
-            vals.append(v)
+        vals = [float(coeffs[n][j].item()) for n in names]
         print(f"  J{j}   " + "  ".join(f"{v:8.4f}" for v in vals))
 
 

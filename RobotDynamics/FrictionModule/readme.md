@@ -110,16 +110,18 @@ $$
 
 输入仅为当前时刻关节速度 $\dot q_t$（`qd_seq` 最后一帧）。**形状由物理模型给定，六个标量每关节一组，可学习。**
 
-**参数化方式** — `StribeckSCVParams` 在 log 空间存参，前向用 `softplus` 保证 $k_v, k_c, k_a, k_s, v_s, \alpha > 0$（$\alpha$ 另有下限 0.5）：
+**参数化方式** — `StribeckSCVParams`：`k_v,k_c,k_a,v_s,α` 经 `softplus` 保证 **> 0**；**$k_s = k_c + \mathrm{softplus}(\log\Delta k_s)$** 保证 **$k_s \ge k_c$**（Stribeck 静摩擦不低于库仑摩擦，训练过程中恒成立）：
 
 | 参数 | 默认初值（约） | 含义 |
 |------|----------------|------|
 | $k_v$ | 0.01 | 粘性 |
 | $k_c$ | 0.1 | 库仑 |
 | $k_a$ | 10 | $\tanh$ 在零速附近的陡度 |
-| $k_s$ | 0.15 | Stribeck 峰值侧 |
+| $\Delta k_s$ | 0.05 → $k_s=k_c+\Delta k_s\approx 0.15$ | Stribeck 静摩擦超额（相对 $k_c$） |
 | $v_s$ | 0.05 | Stribeck 特征速度 |
 | $\alpha$ | 1.5 | Stribeck 曲线指数 |
+
+旧 checkpoint 若仍含 `log_k_s`，加载时自动迁移为 `log_delta_k_s = \mathrm{inv\_softplus}(k_s-k_c)`。
 
 初值是优化起点，**不是**台架标定或曲线拟合的最终结果；本仓库**未**接入离线 Stribeck 辨识脚本。
 

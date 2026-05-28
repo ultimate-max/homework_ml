@@ -3,7 +3,7 @@ H-Net（Xun 等分数阶摩擦图 4 的神经化实现）：TCN₁ → MLP → T
 
   [q, q̇]^{t-L:t}  --TCN₁-->  v_seq（等效分数阶微分）
                  --MLP-->    s_seq（两层 tanh MLP，逐时刻权重共享）
-                 --TCN₂-->  τ_fri（线性因果积分 / 滞回记忆，无激活）
+                 --TCN₂-->  z  --softplus·tanh(β q̇)-->  τ_fri（与 SCV 同号阻力约定）
 
 TCN₁ 输入为位置与速度拼接（与 Yeo H-Net TCN 一致）。
 """
@@ -111,6 +111,22 @@ def _stack_q_qd(q_seq: torch.Tensor, qd_seq: torch.Tensor) -> torch.Tensor:
     return torch.cat([q_seq, qd_seq], dim=-1).transpose(1, 2)
 
 
+def _resistive_torque(
+    tau_mag: torch.Tensor,
+    qd: torch.Tensor,
+    *,
+    sign_smooth: float = 50.0,
+) -> torch.Tensor:
+    """
+    结构约束：τ = softplus(tau_mag) · tanh(sign_smooth · qd)。
+
+    与 SCV / ``scv_torque`` 同号约定（τ 与 qd 同号）；幅值由网络学，符号由 qd 决定。
+    """
+    mag = torch.nn.functional.softplus(tau_mag)
+    direction = torch.tanh(sign_smooth * qd)
+    return mag * direction
+
+
 class HNetFOCascade(nn.Module):
     """
     级联摩擦网络：TCN₁([q,q̇]) → 两层 tanh MLP → TCN₂ → τ_fri。
@@ -181,7 +197,8 @@ class HNetFOCascade(nn.Module):
 
         s_ch = s_seq.transpose(1, 2)
         h_f = self.tcn_int(s_ch)
-        tau_fri = self.head(h_f[:, :, -1])
+        qd_t = qd_seq[:, -1, :]
+        tau_fri = _resistive_torque(self.head(h_f[:, :, -1]), qd_t)
         return tau_fri
 
     def forward_with_internals(
@@ -196,7 +213,8 @@ class HNetFOCascade(nn.Module):
         v_seq = self.proj_v(self.tcn_diff(x)).transpose(1, 2)
         s_seq = self.stribeck_mlp(v_seq)
         s_ch = s_seq.transpose(1, 2)
-        tau_fri = self.head(self.tcn_int(s_ch)[:, :, -1])
+        qd_t = qd_seq[:, -1, :]
+        tau_fri = _resistive_torque(self.head(self.tcn_int(s_ch)[:, :, -1]), qd_t)
         return (
             tau_fri,
             v_seq[:, -1, :],

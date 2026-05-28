@@ -320,6 +320,8 @@ $$
 | $w_{\text{fri}}$ | `--friction-loss-weight` | SMAPE 摩擦下默认 **1.0**；仅当 `fri-loss mse` 且 $l_{\text{fri}}$ 很大时用 **0.01~0.1** |
 | $l_E$ | `--energy-loss` | Yeo Eq. (7)；权重 `--energy-loss-weight`（默认 1.0） |
 
+**阻力符号（结构约束，非 loss）**：`fo_cascade` / `fo_cascade_pinn` 的 TCN 输出为 $\hat\tau=\mathrm{softplus}(z)\cdot\tanh(\beta\dot q)$，与 SCV 同号约定；SCV 侧另设 $k_s=k_c+\mathrm{softplus}(\Delta k_s)\ge k_c$。
+
 能量项（可选）：
 
 $$

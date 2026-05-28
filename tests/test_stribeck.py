@@ -2,7 +2,36 @@
 
 import torch
 
-from RobotDynamics.FrictionModule import HNetStribeck, HNetStribeckPINN, scv_torque
+from RobotDynamics.FrictionModule import HNetStribeck, HNetStribeckPINN, StribeckSCVParams, scv_torque
+from RobotDynamics.FrictionModule.stribeck import _init_log_positive
+
+
+def test_scv_k_s_ge_k_c() -> None:
+    scv = StribeckSCVParams(4)
+    c = scv.positive_coefficients()
+    assert torch.all(c["k_s"] >= c["k_c"] - 1e-9)
+    # 随机扰动参数后仍满足
+    with torch.no_grad():
+        for p in scv.parameters():
+            p.add_(torch.randn_like(p) * 0.5)
+    c2 = scv.positive_coefficients()
+    assert torch.all(c2["k_s"] >= c2["k_c"] - 1e-9)
+
+
+def test_scv_load_legacy_log_k_s() -> None:
+    old = StribeckSCVParams(2)
+    legacy = {
+        "log_k_v": old.log_k_v.clone(),
+        "log_k_c": old.log_k_c.clone(),
+        "log_k_a": old.log_k_a.clone(),
+        "log_k_s": torch.tensor([_init_log_positive(0.2), _init_log_positive(0.3)]),
+        "log_v_s": old.log_v_s.clone(),
+        "log_alpha": old.log_alpha.clone(),
+    }
+    new = StribeckSCVParams(2)
+    new.load_state_dict(legacy)
+    c = new.positive_coefficients()
+    assert torch.all(c["k_s"] >= c["k_c"] - 1e-9)
 
 
 def test_scv_zero_velocity_smooth() -> None:
