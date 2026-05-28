@@ -3,6 +3,9 @@ Mysteric-Net: DeLaN 刚体 (L-Net) + 摩擦子网络 (H-Net)。
 
   tau_hat = tau_rigid + tau_fri
 
+  PINN 后端可通过 ``pinn_friction_output='physics'`` 令 ``tau_hat`` 使用 SCV/GMS
+  物理输出（无 ``τ_fri`` 标签时推荐），``tau_fri`` 返回值仍为 MLP/fo 预测供 ``l_fri``。
+
 摩擦后端 ``friction_backend``:
   - ``tcn``: 原论文 TCN（Yeo 等）
   - ``fo_cascade``: TCN₁→两层 tanh MLP→TCN₂（Xun 图 4 简化）
@@ -36,6 +39,9 @@ FrictionBackend = Literal[
     "gms_pinn",
 ]
 
+PINN_FRICTION_BACKENDS = frozenset({"stribeck_pinn", "fo_cascade_pinn", "gms_pinn"})
+PinnFrictionOutput = Literal["pred", "physics"]
+
 
 class MystericNet(nn.Module):
     def __init__(
@@ -59,11 +65,21 @@ class MystericNet(nn.Module):
         fo_mlp_hidden_dim: int | None = None,
         fo_tcn_layers: int | None = None,
         lnet_zero_cg: bool = False,
+        pinn_friction_output: PinnFrictionOutput = "pred",
     ) -> None:
         super().__init__()
         self.dof = dof
         self.seq_len = seq_len
         self.friction_backend: FrictionBackend = friction_backend
+        if (
+            pinn_friction_output == "physics"
+            and friction_backend not in PINN_FRICTION_BACKENDS
+        ):
+            raise ValueError(
+                f"pinn_friction_output='physics' 仅适用于 PINN 后端，"
+                f"当前 friction_backend={friction_backend!r}"
+            )
+        self.pinn_friction_output: PinnFrictionOutput = pinn_friction_output
         gms_blocks = gms_n_blocks if gms_n_blocks is not None else gms_n_elements
         self.gms_n_blocks = gms_blocks
         self.lnet = LNet(
@@ -124,6 +140,19 @@ class MystericNet(nn.Module):
         else:
             raise ValueError(f"未知 friction_backend={friction_backend!r}")
 
+    def friction_in_total_torque(
+        self,
+        tau_fri: torch.Tensor,
+        tau_fri_physics: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """``tau_hat`` 中实际使用的摩擦项（PINN 无标签时可为 SCV/GMS 物理输出）。"""
+        if (
+            self.pinn_friction_output == "physics"
+            and tau_fri_physics is not None
+        ):
+            return tau_fri_physics
+        return tau_fri
+
     def forward(
         self,
         q: torch.Tensor,
@@ -146,10 +175,11 @@ class MystericNet(nn.Module):
             tau_fri, _ = self.hnet(q_seq, qd_seq)
         elif self.friction_backend == "gms":
             tau_fri, _ = self.hnet(q_seq, qd_seq)
-        elif self.friction_backend in ("stribeck_pinn", "fo_cascade_pinn", "gms_pinn"):
+        elif self.friction_backend in PINN_FRICTION_BACKENDS:
             tau_fri, tau_fri_physics = self.hnet(q_seq, qd_seq)
         else:
             raise RuntimeError(f"未处理的 friction_backend={self.friction_backend!r}")
 
-        tau_hat = tau_core + tau_fri
+        tau_for_hat = self.friction_in_total_torque(tau_fri, tau_fri_physics)
+        tau_hat = tau_core + tau_for_hat
         return tau_hat, tau_core, tau_fri, H_hat, g_hat, tau_fri_physics

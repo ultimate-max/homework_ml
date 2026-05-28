@@ -231,6 +231,9 @@ def load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[Mysteric
         )
     if ckpt.get("motor_identify"):
         kw["lnet_zero_cg"] = bool(ckpt.get("lnet_zero_cg", True))
+    pinn_out = ckpt.get("pinn_friction_output")
+    if pinn_out is not None:
+        kw["pinn_friction_output"] = str(pinn_out)
     model = MystericNet(**kw).to(device)
     model.load_state_dict(state)
     model.eval()

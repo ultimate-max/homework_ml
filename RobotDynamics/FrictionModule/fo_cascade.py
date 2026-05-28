@@ -3,7 +3,7 @@ H-Net（Xun 等分数阶摩擦图 4 的神经化实现）：TCN₁ → MLP → T
 
   [q, q̇]^{t-L:t}  --TCN₁-->  v_seq（等效分数阶微分）
                  --MLP-->    s_seq（两层 tanh MLP，逐时刻权重共享）
-                 --TCN₂-->  z  --softplus·tanh(β q̇)-->  τ_fri（与 SCV 同号阻力约定）
+                 --TCN₂-->  z  --softplus·tanh(β q̇)-->  τ_fri（与 SCV 同号阻力约定：τ·q̇≤0）
 
 TCN₁ 输入为位置与速度拼接（与 Yeo H-Net TCN 一致）。
 """
@@ -118,13 +118,13 @@ def _resistive_torque(
     sign_smooth: float = 50.0,
 ) -> torch.Tensor:
     """
-    结构约束：τ = softplus(tau_mag) · tanh(sign_smooth · qd)。
+    结构约束：τ = −softplus(tau_mag) · tanh(sign_smooth · qd)。
 
-    与 SCV / ``scv_torque`` 同号约定（τ 与 qd 同号）；幅值由网络学，符号由 qd 决定。
+    与 SCV / ``scv_torque`` 同号约定（τ_fri 与 qd 反号，阻力）；幅值由网络学。
     """
     mag = torch.nn.functional.softplus(tau_mag)
     direction = torch.tanh(sign_smooth * qd)
-    return mag * direction
+    return -mag * direction
 
 
 class HNetFOCascade(nn.Module):

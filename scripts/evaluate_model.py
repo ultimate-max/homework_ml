@@ -56,6 +56,9 @@ def load_model(model_path: Path, device: torch.device) -> MystericNet:
         kw["lnet_hidden"] = int(l_w)
     if l_d is not None:
         kw["lnet_layers"] = int(l_d)
+    pinn_out = checkpoint.get("pinn_friction_output")
+    if pinn_out is not None:
+        kw["pinn_friction_output"] = str(pinn_out)
     model = MystericNet(**kw).to(device)
     state = checkpoint.get("state_dict") or checkpoint.get("model_state_dict")
     if state is None:

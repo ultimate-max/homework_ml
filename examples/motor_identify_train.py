@@ -44,7 +44,7 @@ from RobotDynamics.DeLaN import (
 )
 from RobotDynamics.FrictionModule import (
     build_mysteric_tensors,
-    friction_pinn_loss,
+    friction_pinn_tau_blend_loss,
     stack_trajectories_to_flat,
 )
 from RobotDynamics.MystericNet import MystericNet
@@ -533,6 +533,7 @@ def main() -> None:
         mass_diag_eps=mass_eps,
         lnet_numerical_H_ridge=mass_eps,
         lnet_zero_cg=zero_cg,
+        pinn_friction_output="physics",
     ).to(device)
 
     if args.known_J is not None and args.known_J > 0 and not args.no_lnet_j_init:
@@ -627,31 +628,32 @@ def main() -> None:
                 taub, tfb = taui[idx], tau_fri_t[idx]
                 qs, qds = q_seq[idx], qd_seq[idx]
 
-                tau_hat, _core, tau_fri, _H, _g, tau_phys = model(
+                tau_hat, tau_core, tau_fri, _H, _g, tau_phys = model(
                     qb, qdb, qddb, qs, qds
                 )
                 assert tau_phys is not None
+                tau_fri_total = model.friction_in_total_torque(tau_fri, tau_phys)
                 ltau = torque_loss(tau_hat, taub, args.tau_loss, smape_eps=args.smape_eps)
                 if inertia_only:
                     lf = torch.zeros((), device=device, dtype=ltau.dtype)
                     lcore = torch.zeros((), device=device, dtype=ltau.dtype)
                     loss = ltau
                     if stage2_w_inertia > 0:
-                        tau_inertial_tgt = taub - tau_fri.detach()
+                        tau_inertial_tgt = taub - tau_fri_total.detach()
                         lcore = torque_loss(
-                            _core,
+                            tau_core,
                             tau_inertial_tgt,
                             args.tau_loss,
                             smape_eps=args.smape_eps,
                         )
                         loss = loss + stage2_w_inertia * lcore
                 else:
-                    lf, _, _ = friction_pinn_loss(
+                    lf, _, _ = friction_pinn_tau_blend_loss(
+                        tau_core,
                         tau_fri,
-                        tfb,
                         tau_phys,
+                        taub,
                         lambda_physics=args.lambda_physics,
-                        supervise_friction=False,
                         fri_loss=args.fri_loss,
                         smape_eps=args.smape_eps,
                     )

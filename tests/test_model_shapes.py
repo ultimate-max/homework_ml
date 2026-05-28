@@ -10,7 +10,13 @@ from RobotDynamics.MystericNet import MystericNet
 )
 def test_mysteric_forward_shapes(backend: str) -> None:
     dof, L, B = 2, 30, 4
-    m = MystericNet(dof=dof, seq_len=L, friction_backend=backend)
+    pinn_out = "physics" if backend in ("stribeck_pinn", "fo_cascade_pinn", "gms_pinn") else "pred"
+    m = MystericNet(
+        dof=dof,
+        seq_len=L,
+        friction_backend=backend,
+        pinn_friction_output=pinn_out,
+    )
     q = torch.randn(B, dof)
     qd = torch.randn(B, dof)
     qdd = torch.randn(B, dof)

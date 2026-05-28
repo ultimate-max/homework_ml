@@ -1,8 +1,10 @@
 """
 Stribeck-Coulomb-Viscous (SCV) 摩擦模型（Hu 等, Eq. (3)(4)）及 PINN 摩擦网络。
 
-CV:  τ_F = k_c tanh(k_a q̇) + k_v q̇
-SCV: τ_F = k_v q̇ + k_c tanh(k_a q̇) + (k_s - k_c) exp(-|q̇/v_s|^α) tanh(k_a q̇)
+CV:  τ_F = −(k_c tanh(k_a q̇) + k_v q̇)
+SCV: τ_F = −(k_v q̇ + k_c tanh(k_a q̇) + (k_s - k_c) exp(-|q̇/v_s|^α) tanh(k_a q̇))
+
+符号：τ_fri 与 q̇ 反号（阻力），与 pickle 分解 τ_fri = τ − m − c − g 一致。
 
 约束：k_s = k_c + softplus(log_delta_k_s) ≥ k_c（静摩擦不低于库仑摩擦）。
 """
@@ -169,8 +171,8 @@ def cv_torque(
     k_c: torch.Tensor,
     k_a: torch.Tensor,
 ) -> torch.Tensor:
-    """Coulomb-viscous，符号约定与 (tau - m - c - g) 一致。"""
-    return k_v * qd + k_c * torch.tanh(k_a * qd)
+    """Coulomb-viscous；τ_fri 与 q̇ 反号（与 τ−m−c−g 一致）。"""
+    return -(k_v * qd + k_c * torch.tanh(k_a * qd))
 
 
 def scv_torque(
@@ -182,12 +184,12 @@ def scv_torque(
     v_s: torch.Tensor,
     alpha: torch.Tensor,
 ) -> torch.Tensor:
-    """Stribeck-Coulomb-viscous，符号约定与 (tau - m - c - g) 一致。"""
+    """Stribeck-Coulomb-viscous；τ_fri 与 q̇ 反号（与 τ−m−c−g 一致）。"""
     coulomb = k_c * torch.tanh(k_a * qd)
     viscous = k_v * qd
     ratio = torch.abs(qd / v_s.unsqueeze(0).clamp_min(1e-8))
     stribeck = (k_s - k_c) * torch.exp(-torch.pow(ratio, alpha.unsqueeze(0))) * torch.tanh(k_a * qd)
-    return viscous + coulomb + stribeck
+    return -(viscous + coulomb + stribeck)
 
 
 class HNetStribeck(nn.Module):
