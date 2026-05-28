@@ -13,7 +13,7 @@ DeLaN_Stribeck/
 ├── examples/
 │   ├── delan_train.py      # 仅训练 DeLaN（刚体）
 │   ├── delan_evaluate.py   # DeLaN 测试与绘图
-│   ├── robot_train.py      # L-Net + 摩擦（机械臂 pickle；两阶段 / 续训）
+│   ├── robot_train.py      # L-Net + 摩擦（机械臂 pickle；三阶段 / 续训）
 │   ├── robot_evaluate.py   # Mysteric-Net 测试与摩擦曲线图
 │   ├── motor_identify_train.py  # 单电机惯量 J + 摩擦（n_dof=1）
 │   └── synthetic_train.py  # 2-DoF 合成数据冒烟训练
@@ -351,15 +351,20 @@ python examples/synthetic_train.py --data data/synthetic_2dof_inverse.npz --ener
 
 其中 `{backend}` 为 `--friction-backend`（如 `stribeck`、`fo_cascade_pinn`）。`-m` 仅保留兼容，行为与上表一致。
 
-**两阶段训练**（推荐用于无摩擦分解标签、长训机械臂）：阶段 1 联合优化 L-Net + hnet；阶段 2 **冻结 hnet**，仅用 $l_\tau$ 让 $\hat\tau_{\text{core}}$ 拟合 $\tau_{\text{meas}}-\hat\tau_{\text{fri}}$。
+**分阶段训练（S1/S2/S3）**（推荐用于无摩擦分解标签、长训机械臂）：
+阶段 1 联合优化 L-Net + hnet；阶段 2 **冻结 hnet**，仅用 $l_\tau$ 让 $\hat\tau_{\text{core}}$ 拟合 $\tau_{\text{meas}}-\hat\tau_{\text{fri}}$；
+阶段 3 **冻结 L-Net**，仅优化 hnet，但 $\hat\tau_{\text{core}}$ 仍通过 $\hat\tau=\hat\tau_{\text{core}}+\hat\tau_{\text{fri}}$ 参与总损失，辅助摩擦网络收敛。
+其中阶段 1 支持 **不同学习率**：`--lr` 控制 hnet，`--lnet-lr` 控制 L-Net（未设时两者相同）。
 
 | 阶段 | 轮数 | 可训练模块 | 损失 | 日志 |
 |------|------|------------|------|------|
-| **1** | `--stage1-epochs` 或 `epochs − stage2` | L-Net + hnet | $l_\tau + w_{\text{fri}}\,l_{\text{fri}}$ | `[S1]` |
-| **2** | `--stage2-epochs`（`0`=仅单阶段） | **仅 L-Net** | $l_\tau$（目标为 $\tau-\hat\tau_{\text{fri}}$） | `[S2-L]` |
+| **1** | `--stage1-epochs` 或 `epochs − stage2 − stage3` | L-Net + hnet | $l_\tau + w_{\text{fri}}\,l_{\text{fri}}$ | `[S1]` |
+| **2** | `--stage2-epochs`（`0`=跳过） | **仅 L-Net** | $l_\tau$（目标为 $\tau-\hat\tau_{\text{fri}}$） | `[S2-L]` |
+| **3** | `--stage3-epochs`（`0`=关闭） | **仅 hnet**（冻结 L-Net） | $l_\tau + w_{\text{fri}}\,l_{\text{fri}}$（$\hat\tau_{\text{core}}$ 仍参与） | `[S3-H]` |
 
-- 未指定 `--stage1-epochs` 时，阶段 1 轮数 = `epochs − stage2`（例：总 3000、阶段 2 为 1000 → 阶段 1 为 2000）。  
-- 进入阶段 2 时终端打印「已冻结 hnet」；可用 `--stage2-lr`（常取 `5e-4`）单独设学习率。
+- 未指定 `--stage1-epochs` 时，阶段 1 轮数 = `epochs − stage2 − stage3`（例：总 3000、阶段 2 为 1000、阶段 3 为 500 → 阶段 1 为 1500）。  
+- 进入阶段 2 时终端打印「已冻结 hnet」；可用 `--stage2-lr`（常取 `5e-4`）单独设学习率。  
+- 进入阶段 3 时终端打印「已冻结 lnet」；可用 `--stage3-lr` 单独设学习率。
 
 ```bash
 # 6 轴 robot_fric：纯 Stribeck + 无摩擦标签（B 情况）
@@ -367,9 +372,13 @@ python examples/robot_train.py \
   --data data/robot_fric.pickle \
   --friction-backend stribeck \
   --friction-label none \
+  --lr 1e-3 \
+  --lnet-lr 1e-4 \
   --epochs 3000 \
   --stage2-epochs 1000 \
+  --stage3-epochs 500 \
   --stage2-lr 5e-4 \
+  --stage3-lr 1e-3 \
   --test-labels q
 ```
 
@@ -377,7 +386,7 @@ python examples/robot_train.py \
 
 - 加载已有 `state_dict` 与结构；从 **checkpoint 内 `epoch` + 1** 继续（若无 `epoch` 字段，则从文件名 `*_epoch01500.pt` 推断，下一 epoch 为 1501）。  
 - **`--epochs` 表示训练总目标轮数**（不是「再训多少轮」）。例：checkpoint 停在 1500、`--epochs 3000` → 训练 1501…3000。  
-- 续训起点已超过阶段 1 且设置了 `--stage2-epochs` 时，自动进入阶段 2（冻结 hnet）。  
+- 续训起点若已超过阶段边界，会自动进入对应阶段（S2 冻结 hnet；S3 冻结 lnet）。  
 - **`--friction-backend` 应与保存时一致**；数据 `n_dof` 须与 checkpoint 一致。  
 - 续训**不**恢复 optimizer 状态；`loss CSV` 会按本次运行重新写入（可先备份旧 CSV）。
 
@@ -390,6 +399,7 @@ python examples/robot_train.py \
   --resume checkpoints/stribeck_net.pt \
   --epochs 3000 \
   --stage2-epochs 1000 \
+  --stage3-epochs 500 \
   --test-labels q
 
 # 从周期快照续训（已完成 1500 epoch → 从 1501 开始）
@@ -400,6 +410,7 @@ python examples/robot_train.py \
   --resume checkpoints/stribeck_net_epoch01500.pt \
   --epochs 3000 \
   --stage2-epochs 1000 \
+  --stage3-epochs 500 \
   --test-labels q
 ```
 
@@ -411,8 +422,9 @@ python examples/robot_train.py \
 | `--friction-backend` | `stribeck_pinn` | 见上表 |
 | `--friction-label` | `auto` | `auto`/`none`/`decomposed`：无 m/c/g 时用 `none` 则 $l_{\text{fri}}=0$（纯 stribeck） |
 | `--epochs` | `500` | 总训练 epoch（含续训终点） |
-| `--stage1-epochs` / `--stage2-epochs` | 无 / `0` | 两阶段划分 |
+| `--stage1-epochs` / `--stage2-epochs` / `--stage3-epochs` | 无 / `0` / `0` | 分阶段划分（S1/S2/S3） |
 | `--stage2-lr` | 同 `--lr` | 阶段 2 学习率 |
+| `--stage3-lr` | 同 `--lr` | 阶段 3 学习率 |
 | `--lr` | `1e-3` | 阶段 1 **摩擦子网 hnet** 学习率 |
 | `--lnet-lr` | 同 `--lr` | 阶段 1 **L-Net** 学习率；设小一些可减轻摩擦与 $H$ 抢残差（例 `1e-4`） |
 | `--resume` | 无 | 从 checkpoint 续训 |
@@ -421,7 +433,7 @@ python examples/robot_train.py \
 | `--energy-loss` | 关 | 可选能量项 $l_E$ |
 | `--test-labels` | `e v q` | 测试轨迹标签 |
 
-不设 `--stage2-epochs`（或 `0`）时为 **单阶段联合训练**（L-Net + hnet 同时更新）。
+不设 `--stage2-epochs` 且不设 `--stage3-epochs`（或都为 `0`）时为 **单阶段联合训练**（L-Net + hnet 同时更新）。
 
 **联合阶段分学习率**（减轻 L-Net 被摩擦带偏，属启发式）：本仓库中 **摩擦 = `hnet`**，**刚体 = `lnet`**。阶段 1 可令 hnet 学得更快、L-Net 更慢：
 

@@ -248,6 +248,10 @@ def _checkpoint_payload(
         "stage2_lr": float(
             args.stage2_lr if args.stage2_lr is not None else args.lr
         ),
+        "stage3_epochs": int(args.stage3_epochs),
+        "stage3_lr": float(
+            args.stage3_lr if args.stage3_lr is not None else args.lr
+        ),
     }
     if report is not None:
         payload["J_est"] = report.j_median
@@ -274,32 +278,44 @@ def _freeze_friction_branch(model: MystericNet) -> int:
     return sum(p.numel() for p in model.hnet.parameters())
 
 
+def _freeze_lnet_branch(model: MystericNet) -> int:
+    """冻结 L-Net，仅保留 hnet 可训练。返回冻结参数量。"""
+    _set_module_trainable(model.lnet, False)
+    _set_module_trainable(model.hnet, True)
+    model.lnet.eval()
+    model.hnet.train()
+    return sum(p.numel() for p in model.lnet.parameters())
+
+
 def _build_optimizer(
     model: MystericNet,
     *,
     lr: float,
-    inertia_only: bool,
+    phase: str,
 ) -> torch.optim.Adam:
-    params = (
-        model.lnet.parameters()
-        if inertia_only
-        else model.parameters()
-    )
+    if phase == "inertia_only":
+        params = model.lnet.parameters()
+    elif phase == "friction_only":
+        params = model.hnet.parameters()
+    else:
+        params = model.parameters()
     return torch.optim.Adam(
         params, lr=lr, weight_decay=1e-5, amsgrad=True
     )
 
 
-def _resolve_stage_epochs(args: argparse.Namespace) -> tuple[int, int, int]:
-    """返回 (stage1_epochs, stage2_epochs, total_epochs)。"""
+def _resolve_stage_epochs(args: argparse.Namespace) -> tuple[int, int, int, int]:
+    """返回 (stage1_epochs, stage2_epochs, stage3_epochs, total_epochs)。"""
     stage2 = max(0, int(args.stage2_epochs))
-    if stage2 > 0:
-        if args.stage1_epochs is not None:
-            stage1 = max(1, int(args.stage1_epochs))
-        else:
-            stage1 = max(1, int(args.epochs) - stage2)
-        return stage1, stage2, stage1 + stage2
-    return max(1, int(args.epochs)), 0, max(1, int(args.epochs))
+    stage3 = max(0, int(args.stage3_epochs))
+    if stage2 <= 0 and stage3 <= 0:
+        total = max(1, int(args.epochs))
+        return total, 0, 0, total
+    if args.stage1_epochs is not None:
+        stage1 = max(1, int(args.stage1_epochs))
+    else:
+        stage1 = max(1, int(args.epochs) - stage2 - stage3)
+    return stage1, stage2, stage3, stage1 + stage2 + stage3
 
 
 def _save_checkpoint(
@@ -386,6 +402,19 @@ def _parse_args() -> argparse.Namespace:
         metavar="W",
         help="阶段 2 附加损失权重：τ_core 拟合 τ_meas−τ_fri（冻结摩擦），"
         "与总力矩 l_τ 相加；0=关闭",
+    )
+    p.add_argument(
+        "--stage3-epochs",
+        type=int,
+        default=0,
+        metavar="N",
+        help="阶段 3（冻结 L-Net，仅优化 hnet；τ_hat 仍用于总力矩损失）epoch 数；0=关闭",
+    )
+    p.add_argument(
+        "--stage3-lr",
+        type=float,
+        default=None,
+        help="阶段 3 学习率，默认与 --lr 相同",
     )
     p.add_argument("--batch", type=int, default=256)
     p.add_argument("--lr", type=float, default=5e-4)
@@ -514,15 +543,17 @@ def main() -> None:
             flush=True,
         )
 
-    stage1_ep, stage2_ep, total_ep = _resolve_stage_epochs(args)
+    stage1_ep, stage2_ep, stage3_ep, total_ep = _resolve_stage_epochs(args)
     args._stage1_epochs = stage1_ep
     stage2_lr = float(args.stage2_lr if args.stage2_lr is not None else args.lr)
+    stage3_lr = float(args.stage3_lr if args.stage3_lr is not None else args.lr)
 
-    opt = _build_optimizer(model, lr=args.lr, inertia_only=False)
+    opt = _build_optimizer(model, lr=args.lr, phase="joint")
     N = qi.shape[0]
     B = args.batch
     w_fri = float(args.friction_loss_weight)
     inertia_only = False
+    friction_only = False
     stage2_w_inertia = float(args.stage2_w_inertia)
 
     print(
@@ -532,10 +563,16 @@ def main() -> None:
         f"zero_cg={zero_cg} (τ_rigid=H·q̈)\n"
         f"  训练阶段: 1..{stage1_ep} 联合(τ+摩擦)"
         + (
-            f" → {stage1_ep + 1}..{total_ep} 仅惯量(lr={stage2_lr:g})"
+            f" → {stage1_ep + 1}..{stage1_ep + stage2_ep} 仅惯量(lr={stage2_lr:g})"
             if stage2_ep > 0
-            else f"（共 {total_ep} epoch）"
+            else ""
         )
+        + (
+            f" → {stage1_ep + stage2_ep + 1}..{total_ep} 仅摩擦(lr={stage3_lr:g}, lnet 冻结)"
+            if stage3_ep > 0
+            else ""
+        )
+        + (f"（共 {total_ep} epoch）" if stage2_ep == 0 and stage3_ep == 0 else "")
         + "\n"
         f"  提示: 激励需覆盖足够 |q̈| 与 |q̇|；J 偏差大可用 --stage2-epochs 冻结摩擦后再学 J。"
     )
@@ -557,12 +594,24 @@ def main() -> None:
             if stage2_ep > 0 and epoch == stage1_ep + 1:
                 n_fr = _freeze_friction_branch(model)
                 inertia_only = True
-                opt = _build_optimizer(model, lr=stage2_lr, inertia_only=True)
+                friction_only = False
+                opt = _build_optimizer(model, lr=stage2_lr, phase="inertia_only")
                 print(
                     f"\n>>> 阶段 2 开始：已冻结 hnet（{n_fr} 参数），"
                     f"仅优化 L-Net；损失=l_τ"
                     f"{f'+{stage2_w_inertia:g}·l_inertia' if stage2_w_inertia > 0 else ''}，"
                     f"lr={stage2_lr:g}\n",
+                    flush=True,
+                )
+            if stage3_ep > 0 and epoch == stage1_ep + stage2_ep + 1:
+                n_ln = _freeze_lnet_branch(model)
+                inertia_only = False
+                friction_only = True
+                opt = _build_optimizer(model, lr=stage3_lr, phase="friction_only")
+                print(
+                    f"\n>>> 阶段 3 开始：已冻结 lnet（{n_ln} 参数），"
+                    f"仅优化 hnet；损失=l_τ+{w_fri:g}·l_fri，"
+                    f"lr={stage3_lr:g}\n",
                     flush=True,
                 )
 
@@ -643,7 +692,7 @@ def main() -> None:
                 )
                 last_report = rep_test
                 n_s = max(steps, 1)
-                phase = "S2-J" if inertia_only else "S1"
+                phase = "S2-J" if inertia_only else ("S3-H" if friction_only else "S1")
                 j_learn = rep_test.j_learned_median
                 l_med = rep_test.l_median
                 core_str = (
