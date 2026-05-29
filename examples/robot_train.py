@@ -14,9 +14,9 @@
 示例:
   python examples/robot_train.py \\
     --data data/robot_fric.pickle \\
-    --friction-backend stribeck \\
-    --stage1-epochs 2000 --stage2-epochs 1000 \\
-    --stage2-lr 5e-4
+    --friction-backend fo_cascade_pinn \\
+    --stage1-epochs 2000 --stage2-epochs 1000 --stage3-epochs 500 \\
+    --stage2-lr 1e-3 --stage3-lr 5e-4
 """
 
 from __future__ import annotations
@@ -142,6 +142,8 @@ def _checkpoint_payload(
         "lnet_layers": l_d,
         "friction_backend": args.friction_backend,
         "lambda_physics": args.lambda_physics,
+        "stage2_lambda_physics": args.stage2_lambda_physics,
+        "stage2_lambda_physics_mult": float(args.stage2_lambda_physics_mult),
         "friction_loss_weight": args.friction_loss_weight,
         "energy_loss": args.energy_loss,
         "energy_loss_weight": args.energy_loss_weight,
@@ -288,7 +290,7 @@ def _parse_args() -> argparse.Namespace:
         "--lr",
         type=float,
         default=1e-3,
-        help="阶段 1 摩擦子网 hnet 学习率；阶段 2 为 L-Net 学习率（若未设 --stage2-lr）",
+        help="阶段 1 联合训练 hnet 学习率；阶段 2 为仅 hnet（若未设 --stage2-lr）",
     )
     p.add_argument(
         "--lnet-lr",
@@ -304,7 +306,21 @@ def _parse_args() -> argparse.Namespace:
         "--lambda-physics",
         type=float,
         default=0.5,
-        help="PINN 摩擦物理项权重 λ（Eq. 6），用于 stribeck_pinn / fo_cascade_pinn",
+        help="PINN 摩擦物理项权重 λ（Eq. 6），用于 stribeck_pinn / fo_cascade_pinn；S1 默认用此值",
+    )
+    p.add_argument(
+        "--stage2-lambda-physics",
+        type=float,
+        default=None,
+        metavar="LAM",
+        help="S2 仅训 hnet 时的 λ；未设则用 --lambda-physics × --stage2-lambda-physics-mult",
+    )
+    p.add_argument(
+        "--stage2-lambda-physics-mult",
+        type=float,
+        default=0.5,
+        help="S2 的 λ = --lambda-physics × mult（默认 0.5，即减半）；"
+        "--stage2-lambda-physics 显式指定时忽略本项",
     )
     p.add_argument(
         "--friction-loss-weight",
@@ -461,26 +477,26 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         metavar="N",
-        help="阶段 2（冻结 hnet，L-Net 拟合 τ−τ_fri）epoch；0=仅单阶段联合训练",
+        help="阶段 2（冻结 L-Net，仅优化 hnet/fo+SCV）epoch；0=跳过",
     )
     p.add_argument(
         "--stage2-lr",
         type=float,
         default=None,
-        help="阶段 2 学习率，默认与 --lr 相同",
+        help="阶段 2（仅 hnet）学习率，默认与 --lr 相同",
     )
     p.add_argument(
         "--stage3-epochs",
         type=int,
         default=0,
         metavar="N",
-        help="阶段 3（冻结 L-Net，仅优化 hnet；但 τ_core 仍参与 loss）epoch；0=关闭",
+        help="阶段 3（冻结 hnet，L-Net 拟合 τ−τ_fri）epoch；0=关闭",
     )
     p.add_argument(
         "--stage3-lr",
         type=float,
         default=None,
-        help="阶段 3 学习率，默认与 --lr 相同",
+        help="阶段 3（仅 L-Net）学习率，默认与 --lr 相同",
     )
     return p.parse_args()
 
@@ -516,8 +532,8 @@ def _phase_at_epoch(
     if e <= stage1_ep:
         return "joint"
     if e <= stage1_ep + stage2_ep:
-        return "lnet"
-    return "friction"
+        return "friction"
+    return "lnet"
 
 
 def _energy_in_loss(phase: TrainPhase, use_energy: bool) -> bool:
@@ -535,8 +551,8 @@ def _phase_label(
     return {
         "warmup": "S0-W",
         "joint": "S1",
-        "lnet": "S2-L",
-        "friction": "S3-H",
+        "friction": "S2-H",
+        "lnet": "S3-L",
     }[phase]
 
 
@@ -659,6 +675,16 @@ def _build_optimizer(
     )
 
 
+def _effective_lambda_physics(args: argparse.Namespace, phase: TrainPhase) -> float:
+    """S2 [S2-H] 仅训 hnet 时使用更低的 PINN 物理项权重。"""
+    lam = float(args.lambda_physics)
+    if phase != "friction":
+        return lam
+    if args.stage2_lambda_physics is not None:
+        return float(args.stage2_lambda_physics)
+    return lam * float(args.stage2_lambda_physics_mult)
+
+
 def _effective_fri_loss(args: argparse.Namespace) -> str:
     """纯 SCV 在 SMAPE 下 pred≪target 时 l_fri≈2 且不降，改用 MSE。"""
     if args.friction_backend in PHYSICS_ONLY_FRICTION and args.fri_loss == "smape":
@@ -677,6 +703,7 @@ def _compute_friction_loss(
     tau_phys: torch.Tensor | None,
     device: torch.device,
     dtype: torch.dtype,
+    lambda_physics: float,
 ) -> torch.Tensor:
     fri_kind = _effective_fri_loss(args)
     pinn_mode = str(getattr(args, "_pinn_loss_mode", "hu"))
@@ -689,7 +716,7 @@ def _compute_friction_loss(
                 tau_fri,
                 tau_phys,
                 taub,
-                lambda_physics=args.lambda_physics,
+                lambda_physics=lambda_physics,
                 fri_loss=fri_kind,
                 smape_eps=args.smape_eps,
                 scv_supervision_loss=str(
@@ -701,7 +728,7 @@ def _compute_friction_loss(
             tau_fri,
             tfb,
             tau_phys,
-            lambda_physics=args.lambda_physics,
+            lambda_physics=lambda_physics,
             supervise_friction=supervise_fri,
             detach_physics=detach_physics,
             fri_loss=fri_kind,
@@ -777,12 +804,20 @@ def main() -> None:
         args.pinn_detach_physics,
         supervise_fri=supervise_fri,
     )
+    stage2_lam = _effective_lambda_physics(args, "friction")
     if args.friction_backend in PINN_FRICTION_BACKENDS:
         if args._pinn_loss_mode == "tau_blend":
+            s2_lam_note = (
+                f"  S2 λ={stage2_lam:g}"
+                if int(args.stage2_epochs) > 0
+                else ""
+            )
             print(
                 f"  PINN[tau_blend]: l_tau→L-Net+fo；"
                 f"l_fri=(1-λ)SMAPE(τ_scv,τ_meas−τ_core)+λ loss(τ_pred,τ_scv.detach())→SCV/fo  "
-                f"λ={args.lambda_physics:g}  scv_lr×{args._scv_lr_mult:g}"
+                f"λ={args.lambda_physics:g}（S1）"
+                + (f"，{s2_lam_note.strip()}" if s2_lam_note else "")
+                + f"  scv_lr×{args._scv_lr_mult:g}"
             )
         else:
             print(
@@ -957,7 +992,7 @@ def main() -> None:
     stage2_lr = float(args.stage2_lr if args.stage2_lr is not None else args.lr)
     stage3_lr = float(args.stage3_lr if args.stage3_lr is not None else args.lr)
     warmup_lr = float(args.warmup_lr if args.warmup_lr is not None else args.lr)
-    friction_lr = stage3_lr
+    friction_lr = stage2_lr
     if args.friction_only:
         phase = "friction"
         n_ln = _freeze_lnet_branch(model)
@@ -987,21 +1022,21 @@ def main() -> None:
         elif phase == "friction":
             n_ln = _freeze_lnet_branch(model)
             opt = _build_optimizer(
-                model, lr=stage3_lr, phase=phase, scv_lr_mult=args._scv_lr_mult
+                model, lr=stage2_lr, phase=phase, scv_lr_mult=args._scv_lr_mult
             )
             if args.resume is not None:
                 print(
-                    f"  续训处于阶段 3 [S3-H]：lnet 已冻结，仅优化 hnet；"
+                    f"  续训处于阶段 2 [S2-H]：lnet 已冻结，仅优化 hnet；"
                     "τ_core 仍通过 τ_hat 参与总损失。"
                 )
         elif phase == "lnet":
             _freeze_friction_branch(model)
             opt = _build_optimizer(
-                model, lr=stage2_lr, phase=phase, scv_lr_mult=1.0
+                model, lr=stage3_lr, phase=phase, scv_lr_mult=1.0
             )
             if args.resume is not None:
                 print(
-                    f"  续训处于阶段 2 [S2-L]：hnet 已冻结，L-Net 拟合 τ_meas−τ_fri。"
+                    f"  续训处于阶段 3 [S3-L]：hnet 已冻结，L-Net 拟合 τ_meas−τ_fri。"
                 )
         else:
             _unfreeze_joint_branches(model)
@@ -1045,7 +1080,14 @@ def main() -> None:
             if args.friction_backend in ("gms", "gms_pinn")
             else ""
         )
-        + f"λ_phys={args.lambda_physics}  w_fri={w_fri}  "
+        + f"λ_phys={args.lambda_physics}"
+        + (
+            f"（S2→{stage2_lam:g}）"
+            if int(args.stage2_epochs) > 0
+            and args.friction_backend in PINN_FRICTION_BACKENDS
+            else ""
+        )
+        + f"  w_fri={w_fri}  "
         + f"w_E={w_E if use_energy else 0:g}  "
         + f"tau_loss={args.tau_loss}  fri_loss={eff_fri}"
         + (f" (CLI={args.fri_loss})" if eff_fri != args.fri_loss else "")
@@ -1081,13 +1123,13 @@ def main() -> None:
                 )
                 + (
                     f" → {warmup_ep + stage1_ep + 1}..{warmup_ep + stage1_ep + stage2_ep}"
-                    f" 仅 L-Net S2(lr={stage2_lr:g})"
+                    f" 仅 hnet S2(lr={stage2_lr:g}, scv_lr×{args._scv_lr_mult:g})"
                     if stage2_ep > 0
                     else ""
                 )
                 + (
                     f" → {warmup_ep + stage1_ep + stage2_ep + 1}..{total_ep}"
-                    f" 仅 hnet S3(lr={stage3_lr:g})"
+                    f" 仅 L-Net S3(lr={stage3_lr:g})"
                     if stage3_ep > 0
                     else ""
                 )
@@ -1185,33 +1227,37 @@ def main() -> None:
                         s1_energy,
                         flush=True,
                     )
-                elif phase == "lnet":
-                    n_fr = _freeze_friction_branch(model)
-                    opt = _build_optimizer(model, lr=stage2_lr, phase=phase, scv_lr_mult=1.0)
-                    print(
-                        f"\n>>> 阶段 2 开始：已冻结 hnet（{n_fr} 参数）；"
-                        f"L-Net 损失为 loss(τ_core, τ_meas−τ_fri)，不含摩擦项；"
-                        f"lr={stage2_lr:g}\n",
-                        flush=True,
-                    )
                 elif phase == "friction":
                     n_ln = _freeze_lnet_branch(model)
                     opt = _build_optimizer(
                         model,
-                        lr=stage3_lr,
+                        lr=stage2_lr,
                         phase=phase,
                         scv_lr_mult=args._scv_lr_mult,
                     )
-                    s3_energy = (
+                    s2_lam = _effective_lambda_physics(args, "friction")
+                    s2_energy = (
                         f"  energy-loss 计入 loss（w_E={w_E:g}）\n"
                         if _energy_in_loss("friction", use_energy)
                         else ""
                     )
                     print(
-                        f"\n>>> 阶段 3 开始：已冻结 lnet（{n_ln} 参数）；"
-                        "仅优化 hnet，但 τ_core 仍通过 τ_hat 参与 loss；"
+                        f"\n>>> 阶段 2 [S2-H] 开始：已冻结 lnet（{n_ln} 参数）；"
+                        "仅优化 hnet（fo+SCV），τ_core 仍通过 τ_hat 参与 loss；"
+                        f"lr={stage2_lr:g}  scv_lr×{args._scv_lr_mult:g}  "
+                        f"λ_phys={s2_lam:g}（S1 为 {args.lambda_physics:g}）\n",
+                        s2_energy,
+                        flush=True,
+                    )
+                elif phase == "lnet":
+                    n_fr = _freeze_friction_branch(model)
+                    opt = _build_optimizer(
+                        model, lr=stage3_lr, phase=phase, scv_lr_mult=1.0
+                    )
+                    print(
+                        f"\n>>> 阶段 3 [S3-L] 开始：已冻结 hnet（{n_fr} 参数）；"
+                        f"L-Net 损失为 loss(τ_core, τ_meas−τ_fri)，不含摩擦项；"
                         f"lr={stage3_lr:g}\n",
-                        s3_energy,
                         flush=True,
                     )
 
@@ -1232,6 +1278,7 @@ def main() -> None:
                 tau_fri_total = model.friction_in_total_torque(tau_fri, tau_phys)
 
                 if phase in ("joint", "friction", "warmup"):
+                    lam_phys = _effective_lambda_physics(args, phase)
                     lf = _compute_friction_loss(
                         args=args,
                         supervise_fri=supervise_fri,
@@ -1242,13 +1289,14 @@ def main() -> None:
                         tau_phys=tau_phys,
                         device=device,
                         dtype=qb.dtype,
+                        lambda_physics=lam_phys,
                     )
                     ltau = torque_loss(
                         tau_hat, taub, args.tau_loss, smape_eps=args.smape_eps
                     )
                     loss = ltau + w_fri * lf
                 else:
-                    # 阶段 2：hnet 冻结，L-Net 拟合去摩擦后的力矩目标
+                    # 阶段 3：hnet 冻结，L-Net 拟合去摩擦后的力矩目标
                     tau_fri_fixed = tau_fri_total.detach()
                     tau_rigid_target = taub - tau_fri_fixed
                     lf = torch.zeros((), device=device, dtype=qb.dtype)
@@ -1261,7 +1309,7 @@ def main() -> None:
                     loss = ltau
 
                 if _energy_in_loss(phase, use_energy):
-                    # S2：hnet 冻结 → τ_fri 不参与 l_E 反传；其余阶段 τ_fri 可训
+                    # S3：hnet 冻结 → τ_fri 不参与 l_E 反传；其余阶段 τ_fri 可训
                     tau_fri_for_e = (
                         tau_fri_total.detach()
                         if phase == "lnet"
@@ -1317,7 +1365,7 @@ def main() -> None:
                 epoch == 1
                 or epoch % loss_interval == 0
                 or epoch == total_ep
-                or (stage2_ep > 0 and epoch == stage1_ep)
+                or (stage2_ep > 0 and epoch == warmup_ep + stage1_ep + 1)
             )
             if log_ep:
                 with torch.no_grad():
@@ -1359,9 +1407,9 @@ def main() -> None:
                         f"  l_E={lE_m:.4f} (监控,未计入loss; 加 --energy-loss)"
                     )
                 if phase == "lnet":
-                    fri_str = f"  l_fri={lf_m:.4f} (S2:冻结)"
+                    fri_str = f"  l_fri={lf_m:.4f} (S3:冻结)"
                 elif phase == "friction":
-                    fri_str = f"  l_fri={lf_m:.4f}  w_fri*l_fri={w_fri * lf_m:.4f} (S3:训hnet)"
+                    fri_str = f"  l_fri={lf_m:.4f}  w_fri*l_fri={w_fri * lf_m:.4f} (S2:训hnet)"
                 else:
                     fri_str = f"  l_fri={lf_m:.4f}  w_fri*l_fri={w_fri * lf_m:.4f}"
                 print(
