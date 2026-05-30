@@ -44,7 +44,7 @@ def friction_pinn_loss(
 
     ``supervise_friction=False``：无摩擦真值时仅 ``L = λ loss(τ_pred, τ_physics)``。
 
-    ``detach_physics=True``：物理支路不参与 ``l_phys`` 反传（SCV/GMS 作固定锚，
+    ``detach_physics=True``：物理支路不参与 ``l_phys`` 反传（SCV 作固定锚，
     仅 MLP 向物理输出对齐；无 ``τ_true`` 时 SCV 改由 ``l_tau`` 经 ``tau_hat`` 监督）。
     """
     lam = float(lambda_physics)

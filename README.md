@@ -1,27 +1,35 @@
 # DeLaN_Stribeck / RobotDynamics
 
-工业机械臂动力学学习：**DeLaN**（拉格朗日刚体）+ **摩擦模块**（TCN / Stribeck SCV / PINN），Python 包名为 `RobotDynamics`。
+工业机械臂动力学学习：**DeLaN**（拉格朗日刚体）+ **摩擦模块**（TCN / FO 级联 / Stribeck SCV / PINN），Python 包名为 `RobotDynamics`。
+
+多轴迟滞摩擦推荐 **`fo_cascade_pinn`**（文档与对比图中亦称 **LA-FC-PINN**：TCN₁→MLP→TCN₂ + SCV 物理约束）。**main 分支已移除 GMS 摩擦后端**；旧 `gms` / `gms_pinn` checkpoint 无法加载，需用 PINN 后端重新训练。
 
 ## 项目结构
 
 ```text
 DeLaN_Stribeck/
-├── RobotDynamics/          # 主代码包
-│   ├── DeLaN/              # L-Net、数据加载、训练与评估
-│   ├── FrictionModule/     # TCN、FO 级联、Stribeck、合成数据
-│   └── MystericNet/        # DeLaN + 摩擦联合模型
+├── RobotDynamics/              # 主代码包
+│   ├── DeLaN/                  # L-Net、数据加载、训练与评估
+│   ├── FrictionModule/         # TCN、FO 级联、Stribeck SCV、损失与合成数据
+│   └── MystericNet/            # DeLaN + 摩擦联合模型
 ├── examples/
-│   ├── delan_train.py      # 仅训练 DeLaN（刚体）
-│   ├── delan_evaluate.py   # DeLaN 测试与绘图
-│   ├── robot_train.py      # L-Net + 摩擦（机械臂 pickle；三阶段 / 续训）
-│   ├── robot_evaluate.py   # Mysteric-Net 测试与摩擦曲线图
-│   ├── motor_identify_train.py  # 单电机惯量 J + 摩擦（n_dof=1）
-│   └── synthetic_train.py  # 2-DoF 合成数据冒烟训练
+│   ├── delan_train.py          # 仅训练 DeLaN（刚体）
+│   ├── delan_evaluate.py       # DeLaN 测试与绘图
+│   ├── robot_train.py          # L-Net + 摩擦（分阶段 / warmup / 续训）
+│   ├── robot_evaluate.py       # 单模型：摩擦 + 总力矩曲线
+│   ├── robot_compare_evaluate.py   # 多模型同图对比（τ / τ_fri + RMSE）
+│   ├── robot_compare_metrics.py    # 多模型测试集 RMSE 表 / CSV
+│   ├── robot_compare_common.py     # 上述对比脚本共享逻辑
+│   ├── motor_identify_train.py # 单电机惯量 J + fo_cascade_pinn
+│   └── synthetic_train.py      # 2-DoF 合成数据冒烟训练
 ├── scripts/
-│   └── import_delan_data.py  # .mat / .npz → .pickle
-├── data/                   # 数据与导入结果
-├── checkpoints/            # 模型权重
-├── figures/                # 评估图
+│   ├── import_delan_data.py    # .mat / .npz → .pickle
+│   ├── generate_dataset.py     # 2-DoF 合成 .npz
+│   └── verify_delan_impl.py    # DeLaN 实现核对
+├── tests/                      # pytest 单元测试
+├── data/                       # 数据与导入结果（如 robot_fric.pickle）
+├── checkpoints/                # 模型权重与 loss CSV
+├── figures/                    # 评估与对比图
 ├── requirements.txt
 └── environment.yml
 ```
@@ -230,6 +238,21 @@ python scripts/import_delan_data.py --inspect data/robot_fric.pickle --plot \
 python examples/delan_train.py --inspect --data data/robot.pickle
 ```
 
+### 2.6 示例数据 `robot_fric` / `robot_fric1`
+
+本仓库机械臂摩擦实验常用 **`data/robot_fric.pickle`** 或 **`data/robot_fric1.pickle`**（若本地已放置）：
+
+| 项 | 典型值 |
+|----|--------|
+| 自由度 | 6 |
+| 轨迹数 | 20 |
+| 每条长度 | 2048 点 |
+| 采样 | 200 Hz（$dt=0.005\,\mathrm{s}$） |
+| 分解 | 含 `m, c, g` → $\tau_{\text{fri,ref}}=\tau-m-c-g$ |
+| 阻力约定 | $\tau_{\text{fri}}$ 与 $\dot q$ **反号**（阻力矩）；SCV / fo_cascade 实现已对齐 |
+
+无摩擦分解标签时训练用 **`--friction-label none`**，靠总力矩 $l_\tau$ 与 PINN 物理项（`fo_cascade_pinn`）联合辨识摩擦。
+
 ---
 
 ## 3. 训练
@@ -283,6 +306,26 @@ $\mathbb{E}[(\mathrm{d}T/\mathrm{d}t + \mathrm{d}V/\mathrm{d}t - \tau^\top \dot 
 
 在 pickle 上同时训练 **L-Net** 与 **摩擦子网络**（`τ = τ_rigid + τ_fri`）。
 
+**推荐（6 轴、无 τ_fri 标签、迟滞摩擦）**：
+
+```bash
+python examples/robot_train.py \
+  --data data/robot_fric1.pickle \
+  --friction-backend fo_cascade_pinn \
+  --friction-label none \
+  --lambda-physics 0.3 \
+  --lr 1e-3 --lnet-lr 1e-4 \
+  --scv-lr-mult 5 --warmup-lr 5e-4 \
+  --friction-warmup-epochs 200 \
+  --stage1-epochs 6000 \
+  --stage2-epochs 4000 --stage2-lr 1e-3 \
+  --stage3-epochs 4000 --stage3-lr 1e-3 \
+  --energy-loss --energy-loss-weight 0.01 \
+  --test-labels e v q
+```
+
+简单冒烟（默认后端 `stribeck_pinn`）：
+
 ```bash
 python examples/robot_train.py \
   --data data/robot.pickle \
@@ -299,12 +342,12 @@ python examples/robot_train.py \
 | `--friction-backend` | 说明 |
 |----------------------|------|
 | `tcn` | 时序卷积（原 Mysteric-Net 论文） |
-| `fo_cascade` | TCN₁([q,q̇])→**两层 tanh MLP**→TCN₂，对齐 Xun 图 4 简化版 |
-| `fo_cascade_pinn` | fo_cascade + SCV，`friction_pinn_loss`（Hu 等 PINN，$\lambda$=`--lambda-physics`）；**TCN 默认 3 层**（`fo_cascade` 为 2 层） |
-| `stribeck` | 可学习 SCV 物理模型（**仅** $\dot q$，无 MLP/TCN）；见下文 **§3.2.1** |
-| `stribeck_pinn` | MLP + SCV 物理损失（Hu 等 PINN） |
-| `gms` | 可学习 **GMS** 物理模型（$N$ 并联 stick/slip + $\sigma_1 v$，对 `qd_seq` 窗内积分）；见 **§3.2.2** |
-| `gms_pinn` | MLP + GMS 物理损失（`--lambda-physics`） |
+| `fo_cascade` | TCN₁([q,q̇])→**两层 tanh MLP**→TCN₂（Xun 图 4 简化版） |
+| **`fo_cascade_pinn`** | **推荐**：fo_cascade + SCV PINN（Hu Eq. (6)）；对比图图例显示 **LA-FC-PINN**；TCN 默认 **3 层** |
+| `stribeck` | 可学习 SCV 物理模型（**仅** $\dot q$，无 MLP/TCN）；见 **§3.2.1** |
+| `stribeck_pinn` | MLP + SCV 物理损失 |
+
+> **已移除**：`gms` / `gms_pinn`（Generalized Maxwell-Slip）不在 main 分支；历史 checkpoint 续训/评估会报错。
 
 **损失（Mysteric-Net，默认不含能量项）**：
 
@@ -320,7 +363,7 @@ $$
 | $w_{\text{fri}}$ | `--friction-loss-weight` | SMAPE 摩擦下默认 **1.0**；仅当 `fri-loss mse` 且 $l_{\text{fri}}$ 很大时用 **0.01~0.1** |
 | $l_E$ | `--energy-loss` | Yeo Eq. (7)；权重 `--energy-loss-weight`（默认 1.0） |
 
-**阻力符号（结构约束，非 loss）**：`fo_cascade` / `fo_cascade_pinn` 的 TCN 输出为 $\hat\tau=\mathrm{softplus}(z)\cdot\tanh(\beta\dot q)$，与 SCV 同号约定；SCV 侧另设 $k_s=k_c+\mathrm{softplus}(\Delta k_s)\ge k_c$。
+**阻力符号（结构约束，非 loss）**：$\tau_{\text{fri}}$ 为阻力矩，与 $\dot q$ 反号；`scv_torque` / fo_cascade 的 `_resistive_torque` 已取负，与 $\tau_{\text{fri,ref}}=\tau-m-c-g$ 一致。`fo_cascade` / `fo_cascade_pinn` 的数据支路为 $\hat\tau=\mathrm{softplus}(z)\cdot\tanh(\beta\dot q)$；SCV 侧设 $k_s=k_c+\mathrm{softplus}(\Delta k_s)\ge k_c$。
 
 能量项（可选）：
 
@@ -353,34 +396,33 @@ python examples/synthetic_train.py --data data/synthetic_2dof_inverse.npz --ener
 
 其中 `{backend}` 为 `--friction-backend`（如 `stribeck`、`fo_cascade_pinn`）。`-m` 仅保留兼容，行为与上表一致。
 
-**分阶段训练（S1/S2/S3）**（推荐用于无摩擦分解标签、长训机械臂）：
-阶段 1 联合优化 L-Net + hnet；阶段 2 **冻结 hnet**，仅用 $l_\tau$ 让 $\hat\tau_{\text{core}}$ 拟合 $\tau_{\text{meas}}-\hat\tau_{\text{fri}}$；
-阶段 3 **冻结 L-Net**，仅优化 hnet，但 $\hat\tau_{\text{core}}$ 仍通过 $\hat\tau=\hat\tau_{\text{core}}+\hat\tau_{\text{fri}}$ 参与总损失，辅助摩擦网络收敛。
-其中阶段 1 支持 **不同学习率**：`--lr` 控制 hnet，`--lnet-lr` 控制 L-Net（未设时两者相同）。
+**分阶段训练（S0-W / S1 / S2-H / S3-L）**（推荐用于无摩擦分解标签、长训机械臂）：
 
-| 阶段 | 轮数 | 可训练模块 | 损失 | 日志 |
-|------|------|------------|------|------|
-| **1** | `--stage1-epochs` 或 `epochs − stage2 − stage3` | L-Net + hnet | $l_\tau + w_{\text{fri}}\,l_{\text{fri}}$ | `[S1]` |
-| **2** | `--stage2-epochs`（`0`=跳过） | **仅 L-Net** | $l_\tau$（目标为 $\tau-\hat\tau_{\text{fri}}$） | `[S2-L]` |
-| **3** | `--stage3-epochs`（`0`=关闭） | **仅 hnet**（冻结 L-Net） | $l_\tau + w_{\text{fri}}\,l_{\text{fri}}$（$\hat\tau_{\text{core}}$ 仍参与） | `[S3-H]` |
+| 阶段 | 标记 | 可训练模块 | 损失要点 |
+|------|------|------------|----------|
+| **0 warmup** | `[S0-W]` | **仅 hnet**（L-Net 冻结） | $l_\tau + w_{\text{fri}}\,l_{\text{fri}}$；SCV lr × `--scv-lr-mult` |
+| **1 联合** | `[S1]` | L-Net + hnet | 同上；`--lr`→hnet，`--lnet-lr`→L-Net |
+| **2 摩擦** | `[S2-H]` | **仅 hnet**（L-Net 冻结） | $l_\tau + w_{\text{fri}}\,l_{\text{fri}}$；$\lambda_{\text{phys}}$ 默认 ×0.5 |
+| **3 刚体** | `[S3-L]` | **仅 L-Net**（hnet 冻结） | $l_\tau$（$\hat\tau_{\text{core}}$ 拟合 $\tau-\hat\tau_{\text{fri}}$） |
 
-- 未指定 `--stage1-epochs` 时，阶段 1 轮数 = `epochs − stage2 − stage3`（例：总 3000、阶段 2 为 1000、阶段 3 为 500 → 阶段 1 为 1500）。  
-- 进入阶段 2 时终端打印「已冻结 hnet」；可用 `--stage2-lr`（常取 `5e-4`）单独设学习率。  
-- 进入阶段 3 时终端打印「已冻结 lnet」；可用 `--stage3-lr` 单独设学习率。
+轮数由 **`--friction-warmup-epochs`**、**`--stage1-epochs`**、**`--stage2-epochs`**、**`--stage3-epochs`** 划分；未设 `stage1` 时，S1 = `epochs − warmup − stage2 − stage3`。
+
+- **S0-W**：`--friction-warmup-epochs`（例 200）；`--warmup-lr` 可低于 `--lr`；与 `--friction-only` 互斥。  
+- **S2-H**：进入时冻结 L-Net；`--stage2-lr`；`--stage2-lambda-physics-mult`（默认 0.5）降低 PINN 物理项，减轻 SCV 与 fo 抢梯度。  
+- **S3-L**：进入时冻结 hnet；`--stage3-lr`；让 L-Net 在固定摩擦下拟合 $\tau_{\text{meas}}-\hat\tau_{\text{fri}}$。  
+- **`--energy-loss`**：warmup **[S0-W] 仅监控** $l_E$，从 S1 起计入 loss。
 
 ```bash
-# 6 轴 robot_fric：纯 Stribeck + 无摩擦标签（B 情况）
+# 6 轴：warmup → 联合 → 专训摩擦 → 专训刚体
 python examples/robot_train.py \
   --data data/robot_fric.pickle \
-  --friction-backend stribeck \
+  --friction-backend fo_cascade_pinn \
   --friction-label none \
-  --lr 1e-3 \
-  --lnet-lr 1e-4 \
-  --epochs 3000 \
-  --stage2-epochs 1000 \
-  --stage3-epochs 500 \
-  --stage2-lr 5e-4 \
-  --stage3-lr 1e-3 \
+  --friction-warmup-epochs 200 \
+  --stage1-epochs 2000 \
+  --stage2-epochs 1000 --stage2-lr 1e-3 \
+  --stage3-epochs 500 --stage3-lr 5e-4 \
+  --lr 1e-3 --lnet-lr 1e-4 \
   --test-labels q
 ```
 
@@ -388,31 +430,35 @@ python examples/robot_train.py \
 
 - 加载已有 `state_dict` 与结构；从 **checkpoint 内 `epoch` + 1** 继续（若无 `epoch` 字段，则从文件名 `*_epoch01500.pt` 推断，下一 epoch 为 1501）。  
 - **`--epochs` 表示训练总目标轮数**（不是「再训多少轮」）。例：checkpoint 停在 1500、`--epochs 3000` → 训练 1501…3000。  
-- 续训起点若已超过阶段边界，会自动进入对应阶段（S2 冻结 hnet；S3 冻结 lnet）。  
-- **`--friction-backend` 应与保存时一致**；数据 `n_dof` 须与 checkpoint 一致。  
+- 续训起点若已超过阶段边界，会自动进入对应阶段（S2-H 冻结 L-Net；S3-L 冻结 hnet）。  
+- **`--friction-backend` 应与保存时一致**；**GMS 旧 checkpoint 不可用**。数据 `n_dof` 须与 checkpoint 一致。  
 - 续训**不**恢复 optimizer 状态；`loss CSV` 会按本次运行重新写入（可先备份旧 CSV）。
 
 ```bash
-# 从最终权重续训到 3000 epoch
+# 从最终权重续训到 12000 epoch（fo_cascade_pinn）
 python examples/robot_train.py \
-  --data data/robot_fric.pickle \
-  --friction-backend stribeck \
+  --data data/robot_fric1.pickle \
+  --friction-backend fo_cascade_pinn \
   --friction-label none \
-  --resume checkpoints/stribeck_net.pt \
-  --epochs 3000 \
-  --stage2-epochs 1000 \
-  --stage3-epochs 500 \
+  --resume checkpoints/fo_cascade_pinn_net.pt \
+  --epochs 12000 \
+  --friction-warmup-epochs 200 \
+  --stage1-epochs 6000 \
+  --stage2-epochs 4000 \
+  --stage3-epochs 2000 \
   --test-labels q
 
-# 从周期快照续训（已完成 1500 epoch → 从 1501 开始）
+# 从周期快照续训（已完成 500 epoch → 从 501 开始）
 python examples/robot_train.py \
-  --data data/robot_fric.pickle \
-  --friction-backend stribeck \
+  --data data/robot_fric1.pickle \
+  --friction-backend fo_cascade_pinn \
   --friction-label none \
-  --resume checkpoints/stribeck_net_epoch01500.pt \
-  --epochs 3000 \
-  --stage2-epochs 1000 \
-  --stage3-epochs 500 \
+  --resume checkpoints/fo_cascade_pinn_net_epoch00500.pt \
+  --epochs 12000 \
+  --friction-warmup-epochs 200 \
+  --stage1-epochs 6000 \
+  --stage2-epochs 4000 \
+  --stage3-epochs 2000 \
   --test-labels q
 ```
 
@@ -421,18 +467,24 @@ python examples/robot_train.py \
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `--data` | `data/robot.pickle` | DeLaN pickle |
-| `--friction-backend` | `stribeck_pinn` | 见上表 |
-| `--friction-label` | `auto` | `auto`/`none`/`decomposed`：无 m/c/g 时用 `none` 则 $l_{\text{fri}}=0$（纯 stribeck） |
-| `--epochs` | `500` | 总训练 epoch（含续训终点） |
-| `--stage1-epochs` / `--stage2-epochs` / `--stage3-epochs` | 无 / `0` / `0` | 分阶段划分（S1/S2/S3） |
-| `--stage2-lr` | 同 `--lr` | 阶段 2 学习率 |
-| `--stage3-lr` | 同 `--lr` | 阶段 3 学习率 |
-| `--lr` | `1e-3` | 阶段 1 **摩擦子网 hnet** 学习率 |
-| `--lnet-lr` | 同 `--lr` | 阶段 1 **L-Net** 学习率；设小一些可减轻摩擦与 $H$ 抢残差（例 `1e-4`） |
+| `--friction-backend` | `stribeck_pinn` | 见上表；多轴迟滞推荐 `fo_cascade_pinn` |
+| `--friction-label` | `auto` | `auto`/`none`/`decomposition`：无 m/c/g 时用 `none` |
+| `--epochs` | `500` | 总训练 epoch（含 warmup + S1/S2/S3；续训为终点） |
+| `--friction-warmup-epochs` | `0` | S0-W：仅训 hnet |
+| `--warmup-lr` | 同 `--lr` | S0-W 学习率 |
+| `--stage1-epochs` / `--stage2-epochs` / `--stage3-epochs` | 无 / `0` / `0` | S1 / S2-H / S3-L |
+| `--stage2-lr` / `--stage3-lr` | 同 `--lr` | S2-H / S3-L 学习率 |
+| `--stage2-lambda-physics-mult` | `0.5` | S2-H 的 $\lambda = \lambda_{\text{S1}} \times$ mult |
+| `--lr` | `1e-3` | S1 **hnet** 学习率 |
+| `--lnet-lr` | 同 `--lr` | S1 **L-Net** 学习率（例 `1e-4` 减轻抢残差） |
+| `--scv-lr-mult` | `10` | warmup / S2-H 中 SCV 参数 lr 倍数 |
+| `--grad-clip` | `1.0` | 梯度裁剪（`0`=关） |
+| `--pinn-loss-mode` | `auto` | `auto`/`hu`/`tau_blend`；无 τ_fri 标签时 `auto`→`tau_blend` |
+| `--lambda-physics` | `0.5` | PINN 物理项 $\lambda$（S1） |
 | `--resume` | 无 | 从 checkpoint 续训 |
 | `--save` | `{backend}_net.pt` | 最终权重路径 |
 | `--checkpoint-save-interval` | `500` | 周期 checkpoint；`0` 关闭 |
-| `--energy-loss` | 关 | 可选能量项 $l_E$ |
+| `--energy-loss` | 关 | 可选 $l_E$（warmup 不计入 loss） |
 | `--test-labels` | `e v q` | 测试轨迹标签 |
 
 不设 `--stage2-epochs` 且不设 `--stage3-epochs`（或都为 `0`）时为 **单阶段联合训练**（L-Net + hnet 同时更新）。
@@ -451,7 +503,7 @@ python examples/robot_train.py \
   --test-labels q
 ```
 
-仍建议配合 **阶段 2**；纯 `stribeck` 且 $l_{\text{fri}}=0$ 时，分 lr 只能缓解，不能替代去摩擦目标。
+仍建议配合 **S2-H / S3-L**；纯 `stribeck` 且 $l_{\text{fri}}=0$ 时，分 lr 只能缓解，不能替代专训摩擦阶段。
 
 #### 3.2.1 纯 `stribeck` 后端与 `l_fri` 不降
 
@@ -467,7 +519,7 @@ python examples/robot_train.py \
 
 **内置处理**：有 `m/c/g` 分解时 **warm-start** $k_c,k_s$；`--fri-loss smape` 且后端为 `stribeck` 时自动改用 **`fri_loss=mse`**。
 
-**推荐**：多轴迟滞摩擦优先 **`fo_cascade_pinn`** 或 **`gms` / `gms_pinn`**；若用 `stribeck` 请显式 **`--fri-loss mse`**。
+**推荐**：多轴迟滞摩擦优先 **`fo_cascade_pinn`（LA-FC-PINN）**；瞬时 SCV 模型可用 `stribeck_pinn`。纯 `stribeck` 请显式 **`--fri-loss mse`**。
 
 ```bash
 python examples/robot_train.py \
@@ -479,43 +531,7 @@ python examples/robot_train.py \
   -m 1
 ```
 
-#### 3.2.2 纯 `gms` 后端（迟滞物理模型）
-
-`--friction-backend gms` 使用 **Generalized Maxwell-Slip (GMS)**：每关节 $N$ 个并联 stick/slip 单元 + 粘性 $\sigma_1 v$，对滑窗 `qd_seq` 做显式 Euler 积分，输出窗末 $\tau_{\text{fri}}$。实现见 `RobotDynamics/FrictionModule/gms.py`。
-
-| 参数 | CLI | 默认 |
-|------|-----|------|
-| 并联 GMS 块数 $N$ | `--gms-blocks` | 3（别名 `--gms-n-elements`） |
-| 积分步长 | `--gms-dt` | **默认从 pickle 的 `t` 推断** `mean(diff(t))`；须与真实采样一致 |
-
-**重要**：GMS 对 `qd_seq` 做 Euler 积分，**`--gms-dt` 必须等于数据采样周期**。例如 `robot_fric.pickle` 为 **0.005 s**（200 Hz），不是 1 kHz 的 0.001。未指定时 `robot_train.py` 会从 `load_dataset` 的 `dt_mean` 自动填入并打印。
-
-与 `stribeck` 相同：纯物理后端自动 **warm-start** 极限面 $v_a$，SMAPE 下自动改 **MSE**；`--lambda-physics` 仅对 `gms_pinn` 有效。
-
-```bash
-# 纯 GMS（robot_fric：dt=0.005，可省略 --gms-dt 由数据推断）
-python examples/robot_train.py \
-  --data data/robot_fric.pickle \
-  --friction-backend gms \
-  --gms-blocks 3 \
-  --gms-dt 0.005 \
-  --fri-loss mse \
-  --epochs 2000 \
-  --test-labels e v q \
-  -m 1
-
-# MLP + GMS 物理约束（robot_fric 须 --gms-dt 0.005 或依赖自动推断）
-python examples/robot_train.py \
-  --data data/robot_fric.pickle \
-  --friction-backend gms_pinn \
-  --lambda-physics 0.5 \
-  --gms-blocks 3 \
-  --gms-dt 0.005 \
-  --fri-loss mse \
-  --epochs 2000 \
-  --test-labels e v q \
-  -m 1
-```
+摩擦损失细节（PINN、`tau_blend`、SCV 参数化）见 [`RobotDynamics/FrictionModule/readme.md`](RobotDynamics/FrictionModule/readme.md)。
 
 ### 3.3 单电机惯量 + 摩擦辨识（`motor_identify_train.py`）
 
@@ -703,36 +719,63 @@ python examples/delan_evaluate.py \
 
 终端会打印 **Torque / Inertial / Coriolis / Gravity / Power** 等 MSE；`n_dof > 2` 时评估图为每个关节一行、四列（τ, m, c, g）。
 
-### 4.2 Mysteric-Net 评估（关节摩擦网络 + 总力矩曲线图）
+### 4.2 Mysteric-Net 单模型评估
 
-**不要用** `delan_evaluate.py`（那只画 DeLaN 刚体四列图，默认 `figures/delan_performance.png`）。
-
-在项目根目录、已 `conda activate frictionest` 时，生成 **各关节摩擦与总力矩对比图**：
+**不要用** `delan_evaluate.py`（那只画 DeLaN 刚体四列图）。
 
 ```bash
-cd /path/to/DeLaN_Stribeck
-
 python examples/robot_evaluate.py \
-  --checkpoint checkpoints/stribeck_net.pt \
-  --data data/robot_fric.pickle \
+  --checkpoint checkpoints/fo_cascade_pinn_net.pt \
+  --data data/robot_fric1.pickle \
   --test-labels q \
-  --figure-out figures/robot_friction_stribeck_net.png
+  --figure-out figures/robot_friction.png
 ```
 
-- **默认输出图**：`figures/robot_friction.png`（省略 `--figure-out` 时同上；含 $\tau_{\text{fri}}$ 预测、参考分解、PINN 时还有 SCV 列）
-- **自定义路径**：`--figure-out figures/my_robot_friction.png`
-- **弹窗查看**：`--figure-out` 可省略，加 `--show` 不保存只显示
-- **`--seq-len`**：一般省略，从 checkpoint 自动读取（与训练一致，如 30）
-- **`--checkpoint`** 须与训练时的 **`--friction-backend` 与 n_dof** 一致（脚本会从权重键名推断后端；DoF 不匹配会报错）
-- 终端会打印 `RMSE τ_hat`、`RMSE τ_fri`（有 m/c/g 分解时）及 SCV 参数表（`fo_cascade_pinn` / `stribeck_pinn` / `stribeck`）
+- **默认输出图**：`figures/robot_friction.png`（$\tau_{\text{fri}}$ 预测、参考分解；PINN 后端含 SCV 列）
+- **`--seq-len`**：一般省略，从 checkpoint 读取
+- **`--checkpoint`** 须与 **`--friction-backend` 与 n_dof** 一致；**GMS 旧权重会报错**
+- 终端打印 `RMSE τ_hat`、`RMSE τ_fri`（有 m/c/g 时）及 SCV 参数表
 
-| checkpoint 来源 | 评估脚本 | 示例路径 |
-|-----------------|----------|----------|
-| `delan_train.py` → `delan_lnet.pt` | `examples/delan_evaluate.py` | `figures/delan_performance.png` |
-| `robot_train.py` → `{backend}_net.pt` | `examples/robot_evaluate.py` | 如 `checkpoints/stribeck_net.pt` |
-| `motor_identify_train.py` → `motor_identify.pt` | `examples/robot_evaluate.py` | 同上（单轴一行图） |
+| checkpoint 来源 | 评估脚本 |
+|-----------------|----------|
+| `delan_train.py` → `delan_lnet.pt` | `delan_evaluate.py` |
+| `robot_train.py` → `{backend}_net.pt` | `robot_evaluate.py` |
+| `motor_identify_train.py` → `motor_identify.pt` | `robot_evaluate.py`（单轴） |
 
-合成 2-DoF `.npz` 测试（无绘图或仅数值）可用：
+### 4.3 多模型对比评估（推荐）
+
+在同一测试轨迹上叠加多个 checkpoint 的 $\tau$ / $\tau_{\text{fri}}$，便于对比不同训练阶段或后端：
+
+**同图对比**（测量/参考为实线；模型为红/绿/蓝虚线；`fo_cascade_pinn` 显示为 **LA-FC-PINN**）：
+
+```bash
+python examples/robot_compare_evaluate.py \
+  --data data/robot_fric1.pickle \
+  --test-labels q \
+  --checkpoint checkpoints/fo_cascade_pinn_net_epoch00500.pt:ep500 \
+  --checkpoint checkpoints/fo_cascade_pinn_net.pt:final \
+  --checkpoint checkpoints/stribeck_pinn_net.pt:stribeck \
+  --figure-out figures/robot_compare.png
+```
+
+- `--checkpoint path:label`：`label` 用于图例；省略时用文件名
+- 图内注释各模型 **RMSE τ** / **RMSE τ_fri**
+
+**RMSE 统计表**（终端 + 可选 CSV）：
+
+```bash
+python examples/robot_compare_metrics.py \
+  --data data/robot_fric1.pickle \
+  --test-labels e v q \
+  --checkpoint checkpoints/fo_cascade_pinn_net_epoch00500.pt:ep500 \
+  --checkpoint checkpoints/fo_cascade_pinn_net.pt:final \
+  --per-joint \
+  --csv-out checkpoints/compare_rmse.csv
+```
+
+共享逻辑在 `examples/robot_compare_common.py`（加载 checkpoint、滑窗推理、RMSE 计算）。
+
+合成 2-DoF `.npz` 数值测试：
 
 ```bash
 python scripts/evaluate_model.py \
@@ -742,7 +785,7 @@ python scripts/evaluate_model.py \
 
 （需先用 `scripts/generate_test_dataset.py` 生成测试 npz。）
 
-### 4.3 实现验证（可选）
+### 4.4 实现验证（可选）
 
 ```bash
 python scripts/verify_delan_impl.py
@@ -754,14 +797,17 @@ python scripts/verify_delan_impl.py
 
 ```bash
 cd /path/to/DeLaN_Stribeck
+conda activate frictionest   # 或 DeLaN 等含 torch 的环境
 pytest tests/ -q
 ```
 
-若环境中 ROS 等插件干扰 pytest，可单独运行：
+WSL / ROS 环境下若 pytest 被 `launch_testing` 等插件干扰：
 
 ```bash
-python -c "from tests.test_stribeck import test_scv_zero_velocity_smooth; test_scv_zero_velocity_smooth(); print('ok')"
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/ -q
 ```
+
+覆盖：`test_stribeck.py`、`test_fo_cascade.py`、`test_friction_loss.py`、`test_pinn_tau_blend.py`、`test_model_shapes.py`、`test_arbitrary_dof.py`。
 
 ---
 
@@ -771,11 +817,17 @@ python -c "from tests.test_stribeck import test_scv_zero_velocity_smooth; test_s
 # DeLaN
 from RobotDynamics.DeLaN import LNet, load_dataset, train_delan_loop, suggest_hyper
 
-# 摩擦
-from RobotDynamics.FrictionModule import HNetStribeckPINN, friction_pinn_loss, scv_torque
+# 摩擦（TCN / FO 级联 / SCV / PINN 损失）
+from RobotDynamics.FrictionModule import (
+    HNetFOCascadePINN,
+    HNetStribeckPINN,
+    friction_pinn_loss,
+    scv_torque,
+    warmstart_scv_from_samples,
+)
 
 # 联合模型
-from RobotDynamics.MystericNet import MystericNet
+from RobotDynamics.MystericNet import MystericNet, PINN_FRICTION_BACKENDS
 
 # 数据导入
 from RobotDynamics.DeLaN import import_mat, save_pickle, inspect_dataset
@@ -786,16 +838,22 @@ from RobotDynamics.DeLaN import import_mat, save_pickle, inspect_dataset
 ## 7. 常见问题
 
 **Q: 训练 loss 很低但图上部分关节很差？**  
-多关节力矩尺度差时，请用 `--tau-loss smape`；以测试集 **RMSE_test** 和 `delan_evaluate.py` 为准。
+多关节力矩尺度差时，请用 `--tau-loss smape`；以测试集 **RMSE_test**、`robot_evaluate.py` 或 `robot_compare_metrics.py` 为准。
+
+**Q: 无 τ_fri 标签时摩擦学不起来？**  
+用 **`fo_cascade_pinn`** + **`--friction-label none`**；配合 **S0-W warmup** 与 **S2-H 专训摩擦**；无标签时 `pinn-loss-mode` 自动为 **`tau_blend`**（见 `FrictionModule/readme.md`）。
 
 **Q: `robot.pickle` 上摩擦网络学不好？**  
-若数据中 `m+c+g ≈ τ`（仿真刚体、几乎无摩擦残差），摩擦子网只能学到接近零；需含真实摩擦或 `τ_fri = τ - τ_rigid` 的实测数据。
+若 `m+c+g ≈ τ`（几乎无摩擦残差），摩擦子网只能接近零；需真实摩擦或含分解的 `robot_fric` 类数据。
 
 **Q: checkpoint 与数据 DoF 不一致？**  
-`robot_evaluate.py` / 续训 `--resume` 会报错；请用与数据相同 `n_dof` 的权重（勿用 2-DoF 的 `tcn` 权重评 6 轴 `robot_fric`）。
+`robot_evaluate.py` / 续训 `--resume` 会报错；勿用 2-DoF 权重评 6 轴数据。
+
+**Q: 旧 GMS checkpoint 还能用吗？**  
+**不能**。main 分支已移除 `gms` / `gms_pinn`；请用 `fo_cascade_pinn` 重新训练。
 
 **Q: 如何接着上次训练？**  
-使用 `robot_train.py --resume checkpoints/{backend}_net.pt`（或 `*_epochNNNNN.pt`），并设 **`--epochs` 为总目标轮数**；见 §3.2「从 checkpoint 续训」。
+`robot_train.py --resume checkpoints/{backend}_net.pt`，**`--epochs` 为总目标轮数**；见 §3.2。
 
 **Q: 找不到 `mysteric_net`？**  
 包已重命名为 **`RobotDynamics`**，请更新 import 与 IDE 工作区根目录。
@@ -806,4 +864,5 @@ from RobotDynamics.DeLaN import import_mat, save_pickle, inspect_dataset
 
 - DeLaN / L-Net：Lutter et al., 拉格朗日神经网络  
 - Mysteric-Net / TCN 摩擦：Yeo et al.  
-- Stribeck PINN 摩擦：Hu et al., *Physics-Informed Learning for the Friction Modeling*（SCV 模型 Eq. (3)(4)，PINN 损失 Eq. (6)）
+- FO 级联摩擦结构：Xun et al.（TCN→MLP→TCN 简化实现见 `fo_cascade.py`）  
+- Stribeck PINN 摩擦：Hu et al., *Physics-Informed Learning for the Friction Modeling*（SCV Eq. (3)(4)，PINN Eq. (6)）

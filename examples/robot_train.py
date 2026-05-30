@@ -5,8 +5,6 @@
 摩擦后端（Hu 等 SCV / PINN）:
   --friction-backend stribeck       纯可学习 SCV 物理模型
   --friction-backend stribeck_pinn  MLP + SCV 物理损失（论文 Eq. (6)）
-  --friction-backend gms            纯可学习 GMS 物理模型（迟滞）
-  --friction-backend gms_pinn       MLP + GMS 物理损失
   --friction-backend tcn            原 TCN（Yeo 等）
   --friction-backend fo_cascade       TCN₁→两层 tanh MLP→TCN₂（Xun 图 4 简化）
   --friction-backend fo_cascade_pinn  fo_cascade + SCV PINN（Eq. 6）
@@ -46,12 +44,11 @@ from RobotDynamics.FrictionModule import (
     mysteric_losses,
     pickle_has_mcg_decomposition,
     stack_trajectories_to_flat,
-    warmstart_gms_from_samples,
     warmstart_scv_from_samples,
 )
 from RobotDynamics.MystericNet import MystericNet, PINN_FRICTION_BACKENDS
 
-PHYSICS_ONLY_FRICTION = frozenset({"stribeck", "gms"})
+PHYSICS_ONLY_FRICTION = frozenset({"stribeck"})
 SCV_FRICTION_BACKENDS = frozenset({"stribeck", "stribeck_pinn", "fo_cascade_pinn"})
 TrainPhase = Literal["warmup", "joint", "lnet", "friction"]
 
@@ -153,9 +150,6 @@ def _checkpoint_payload(
         "data_path": str(args.data.resolve()),
         "fo_mlp_hidden_dim": args.fo_mlp_hidden,
         "fo_tcn_layers": args.fo_tcn_layers,
-        "gms_n_blocks": args.gms_n_blocks,
-        "gms_n_elements": args.gms_n_blocks,
-        "gms_dt": getattr(args, "_gms_dt_resolved", args.gms_dt),
         "lr": float(args.lr),
         "stage1_epochs": int(getattr(args, "_stage1_epochs", args.epochs)),
         "stage2_epochs": int(args.stage2_epochs),
@@ -247,8 +241,6 @@ def _parse_args() -> argparse.Namespace:
             "fo_cascade_pinn",
             "stribeck",
             "stribeck_pinn",
-            "gms",
-            "gms_pinn",
         ),
         default="stribeck_pinn",
     )
@@ -266,22 +258,6 @@ def _parse_args() -> argparse.Namespace:
         metavar="N",
         help="fo_cascade / fo_cascade_pinn 中 TCN₁ 与 TCN₂ 层数；"
         "默认 fo_cascade=2、fo_cascade_pinn=3",
-    )
-    p.add_argument(
-        "--gms-blocks",
-        "--gms-n-elements",
-        dest="gms_n_blocks",
-        type=int,
-        default=3,
-        metavar="N",
-        help="每关节并联 GMS 块数 N（gms / gms_pinn；τ_fri = Σ F_i + σ₁v）",
-    )
-    p.add_argument(
-        "--gms-dt",
-        type=float,
-        default=None,
-        metavar="S",
-        help="GMS 积分步长 (s)。gms/gms_pinn 下默认从 pickle 的 t 推断 mean(diff(t))",
     )
     p.add_argument("--seq-len", type=int, default=30)
     p.add_argument("--epochs", type=int, default=500)
@@ -590,7 +566,7 @@ def _unfreeze_joint_branches(model: MystericNet) -> None:
 def _split_pinn_hnet_params(
     model: MystericNet,
 ) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]] | tuple[None, None]:
-    """PINN hnet → (fo/MLP 参数, SCV/GMS 参数)。"""
+    """PINN hnet → (fo/MLP 参数, SCV 参数)。"""
     hnet = model.hnet
     if hasattr(hnet, "scv") and hasattr(hnet, "fo"):
         return (
@@ -708,7 +684,7 @@ def _compute_friction_loss(
     fri_kind = _effective_fri_loss(args)
     pinn_mode = str(getattr(args, "_pinn_loss_mode", "hu"))
     detach_physics = bool(getattr(args, "_pinn_detach_physics", False))
-    if args.friction_backend in ("stribeck_pinn", "fo_cascade_pinn", "gms_pinn"):
+    if args.friction_backend in PINN_FRICTION_BACKENDS:
         assert tau_phys is not None
         if pinn_mode == "tau_blend":
             lf, _, _ = friction_pinn_tau_blend_loss(
@@ -840,17 +816,7 @@ def main() -> None:
     l_w = args.lnet_width if args.lnet_width is not None else hyper["n_width"]
     l_d = args.lnet_depth if args.lnet_depth is not None else hyper["n_depth"]
 
-    if args.friction_backend in ("gms", "gms_pinn") and args.gms_n_blocks < 1:
-        raise SystemExit("--gms-blocks 须 ≥ 1")
-
-    gms_dt = args.gms_dt
-    if args.friction_backend in ("gms", "gms_pinn"):
-        if gms_dt is None:
-            gms_dt = float(dt_mean)
-            print(f"  GMS: blocks={args.gms_n_blocks}  dt={gms_dt:g} s（由数据 t 推断）")
-        else:
-            print(f"  GMS: blocks={args.gms_n_blocks}  dt={gms_dt:g} s（CLI 指定）")
-        args._gms_dt_resolved = gms_dt
+    eff_fri = _effective_fri_loss(args)
 
     resume_ckpt: dict | None = None
     start_epoch = 1
@@ -863,6 +829,11 @@ def main() -> None:
                 f"checkpoint n_dof={model.dof} 与数据 n_dof={n_dof} 不一致: {args.resume}"
             )
         ckpt_backend = resume_ckpt.get("friction_backend")
+        if ckpt_backend in ("gms", "gms_pinn"):
+            raise SystemExit(
+                f"checkpoint 摩擦后端 {ckpt_backend!r} 已从 main 分支移除，"
+                "请用 fo_cascade_pinn 或 stribeck_pinn 重新训练。"
+            )
         if ckpt_backend is not None and str(ckpt_backend) != args.friction_backend:
             print(
                 f"  警告: CLI friction-backend={args.friction_backend!r} 与 "
@@ -907,21 +878,8 @@ def main() -> None:
             friction_backend=args.friction_backend,
             fo_mlp_hidden_dim=args.fo_mlp_hidden,
             fo_tcn_layers=args.fo_tcn_layers,
-            gms_n_blocks=args.gms_n_blocks,
-            gms_dt=gms_dt if args.friction_backend in ("gms", "gms_pinn") else 0.001,
             pinn_friction_output=pinn_friction_output,  # type: ignore[arg-type]
         ).to(device)
-
-        eff_fri = _effective_fri_loss(args)
-        if args.friction_backend in ("gms", "gms_pinn"):
-            if args.fri_loss == "smape" and eff_fri == "mse":
-                print("  提示: gms 下 SMAPE 对 l_fri 易饱和≈2，已自动改用 fri_loss=mse。")
-            if hasattr(model.hnet, "gms"):
-                n_init = min(4096, qdi.shape[0])
-                warmstart_gms_from_samples(
-                    model.hnet.gms, qdi[:n_init], tau_fri_t[:n_init]
-                )
-                print(f"  已 warm-start GMS 极限面 v_a（N={n_init}）。")
 
         if args.friction_backend == "stribeck":
             if args.fri_loss == "smape" and eff_fri == "mse":
@@ -1050,8 +1008,6 @@ def main() -> None:
             if args.resume is not None:
                 print(f"  续训处于阶段 1 [S1]：L-Net + hnet 联合训练。")
 
-    eff_fri = _effective_fri_loss(args)
-
     N = qi.shape[0]
     B = args.batch
     w_fri = float(args.friction_loss_weight)
@@ -1075,11 +1031,6 @@ def main() -> None:
 
     print(
         f"device={device}  n_dof={n_dof}  friction={args.friction_backend}  "
-        + (
-            f"gms_blocks={args.gms_n_blocks}  "
-            if args.friction_backend in ("gms", "gms_pinn")
-            else ""
-        )
         + f"λ_phys={args.lambda_physics}"
         + (
             f"（S2→{stage2_lam:g}）"

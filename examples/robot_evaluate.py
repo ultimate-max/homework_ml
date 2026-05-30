@@ -93,9 +93,10 @@ def _infer_friction_backend(state: dict) -> str | None:
             return "fo_cascade_pinn"
         return "fo_cascade"
     if any(k.startswith("hnet.gms.") for k in keys):
-        if any(k.startswith("hnet.mlp.") for k in keys):
-            return "gms_pinn"
-        return "gms"
+        raise ValueError(
+            "checkpoint 使用已移除的 GMS 摩擦后端 (gms/gms_pinn)，"
+            "请用 fo_cascade_pinn 或 stribeck_pinn 重新训练。"
+        )
     if any(k.startswith("hnet.scv.") for k in keys):
         if any(k.startswith("hnet.mlp.") for k in keys):
             return "stribeck_pinn"
@@ -128,11 +129,6 @@ def _resolve_dof(state: dict, ckpt: dict) -> int:
     scv_kv = state.get("hnet.scv.log_k_v")
     if scv_kv is not None:
         candidates.append(("hnet.scv", int(scv_kv.shape[0])))
-    for gms_key in ("hnet.gms.log_sigma_1", "hnet.gms.log_v_a"):
-        gms_p = state.get(gms_key)
-        if gms_p is not None:
-            candidates.append(("hnet.gms", int(gms_p.shape[0])))
-            break
 
     dof = candidates[0][1]
     mism = [(n, v) for n, v in candidates if v != dof]
@@ -201,12 +197,11 @@ def load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[Mysteric
         if "hnet_kernel" in ckpt:
             kw["hnet_kernel"] = int(ckpt["hnet_kernel"])
     if backend in ("gms", "gms_pinn"):
-        n_blk = ckpt.get("gms_n_blocks", ckpt.get("gms_n_elements"))
-        if n_blk is not None:
-            kw["gms_n_blocks"] = int(n_blk)
-        if "gms_dt" in ckpt:
-            kw["gms_dt"] = float(ckpt["gms_dt"])
-    if backend in ("stribeck_pinn", "gms_pinn"):
+        raise ValueError(
+            f"checkpoint 摩擦后端 {backend!r} 已从 main 分支移除，"
+            "请用 fo_cascade_pinn 或 stribeck_pinn 重新训练。"
+        )
+    if backend in ("stribeck_pinn",):
         kw["stribeck_hidden"] = _infer_pinn_hidden(state, dof)
     elif backend in ("fo_cascade", "fo_cascade_pinn"):
         hid = ckpt.get("fo_mlp_hidden_dim", ckpt.get("fo_mlp_hidden_layers"))

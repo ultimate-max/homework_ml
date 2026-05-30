@@ -3,7 +3,7 @@ Mysteric-Net: DeLaN 刚体 (L-Net) + 摩擦子网络 (H-Net)。
 
   tau_hat = tau_rigid + tau_fri
 
-  PINN 后端可通过 ``pinn_friction_output='physics'`` 令 ``tau_hat`` 使用 SCV/GMS
+  PINN 后端可通过 ``pinn_friction_output='physics'`` 令 ``tau_hat`` 使用 SCV
   物理输出（无 ``τ_fri`` 标签时推荐），``tau_fri`` 返回值仍为 MLP/fo 预测供 ``l_fri``。
 
 摩擦后端 ``friction_backend``:
@@ -12,8 +12,6 @@ Mysteric-Net: DeLaN 刚体 (L-Net) + 摩擦子网络 (H-Net)。
   - ``fo_cascade_pinn``: fo_cascade + SCV 物理约束（Hu 等 PINN, Eq. (6)）
   - ``stribeck``: 可学习 SCV 物理模型（Hu 等 Eq. (4)）
   - ``stribeck_pinn``: MLP + SCV 物理约束（Hu 等 PINN, Eq. (6)）
-  - ``gms``: 可学习 GMS 物理模型（并联 Maxwell stick/slip + 粘性）
-  - ``gms_pinn``: MLP + GMS 物理约束
 """
 
 from __future__ import annotations
@@ -25,7 +23,6 @@ import torch.nn as nn
 
 from ..DeLaN.lnet import LNet
 from ..FrictionModule.fo_cascade import HNetFOCascade, HNetFOCascadePINN
-from ..FrictionModule.gms import HNetGMS, HNetGMSPINN
 from ..FrictionModule.stribeck import HNetStribeck, HNetStribeckPINN
 from ..FrictionModule.tcn import HNetTCN
 
@@ -35,11 +32,9 @@ FrictionBackend = Literal[
     "fo_cascade_pinn",
     "stribeck",
     "stribeck_pinn",
-    "gms",
-    "gms_pinn",
 ]
 
-PINN_FRICTION_BACKENDS = frozenset({"stribeck_pinn", "fo_cascade_pinn", "gms_pinn"})
+PINN_FRICTION_BACKENDS = frozenset({"stribeck_pinn", "fo_cascade_pinn"})
 PinnFrictionOutput = Literal["pred", "physics"]
 
 
@@ -59,9 +54,6 @@ class MystericNet(nn.Module):
         stribeck_hidden: Tuple[int, ...] = (128, 64),
         stribeck_dropout: float = 0.0,
         scv_variant: Literal["scv", "cv"] = "scv",
-        gms_n_blocks: int | None = None,
-        gms_n_elements: int = 3,
-        gms_dt: float = 0.001,
         fo_mlp_hidden_dim: int | None = None,
         fo_tcn_layers: int | None = None,
         lnet_zero_cg: bool = False,
@@ -80,8 +72,6 @@ class MystericNet(nn.Module):
                 f"当前 friction_backend={friction_backend!r}"
             )
         self.pinn_friction_output: PinnFrictionOutput = pinn_friction_output
-        gms_blocks = gms_n_blocks if gms_n_blocks is not None else gms_n_elements
-        self.gms_n_blocks = gms_blocks
         self.lnet = LNet(
             dof,
             hidden_dim=lnet_hidden,
@@ -121,22 +111,6 @@ class MystericNet(nn.Module):
                 hidden=stribeck_hidden,
                 dropout=stribeck_dropout,
             )
-        elif friction_backend == "gms":
-            self.hnet = HNetGMS(
-                dof,
-                seq_len=seq_len,
-                n_blocks=gms_blocks,
-                dt=gms_dt,
-            )
-        elif friction_backend == "gms_pinn":
-            self.hnet = HNetGMSPINN(
-                dof,
-                seq_len=seq_len,
-                hidden=stribeck_hidden,
-                dropout=stribeck_dropout,
-                n_blocks=gms_blocks,
-                dt=gms_dt,
-            )
         else:
             raise ValueError(f"未知 friction_backend={friction_backend!r}")
 
@@ -145,7 +119,7 @@ class MystericNet(nn.Module):
         tau_fri: torch.Tensor,
         tau_fri_physics: torch.Tensor | None,
     ) -> torch.Tensor:
-        """``tau_hat`` 中实际使用的摩擦项（PINN 无标签时可为 SCV/GMS 物理输出）。"""
+        """``tau_hat`` 中实际使用的摩擦项（PINN 无标签时可为 SCV 物理输出）。"""
         if (
             self.pinn_friction_output == "physics"
             and tau_fri_physics is not None
@@ -164,7 +138,7 @@ class MystericNet(nn.Module):
         """
         Returns:
             tau_hat, tau_core, tau_fri, H_hat, g_hat, tau_fri_physics
-            ``tau_fri_physics`` 在 ``stribeck_pinn`` / ``fo_cascade_pinn`` / ``gms_pinn`` 时为物理摩擦输出，否则为 ``None``。
+            ``tau_fri_physics`` 在 ``stribeck_pinn`` / ``fo_cascade_pinn`` 时为物理摩擦输出，否则为 ``None``。
         """
         tau_core, H_hat, g_hat = self.lnet(q, qd, qdd)
         tau_fri_physics: torch.Tensor | None = None
@@ -172,8 +146,6 @@ class MystericNet(nn.Module):
         if self.friction_backend in ("tcn", "fo_cascade"):
             tau_fri = self.hnet(q_seq, qd_seq)
         elif self.friction_backend == "stribeck":
-            tau_fri, _ = self.hnet(q_seq, qd_seq)
-        elif self.friction_backend == "gms":
             tau_fri, _ = self.hnet(q_seq, qd_seq)
         elif self.friction_backend in PINN_FRICTION_BACKENDS:
             tau_fri, tau_fri_physics = self.hnet(q_seq, qd_seq)

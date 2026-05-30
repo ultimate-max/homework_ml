@@ -1,0 +1,4 @@
+model,backend,checkpoint,test_labels,n_samples,rmse_tau_hat,rmse_tau_fri,rmse_tau_hat_j0,rmse_tau_hat_j1,rmse_tau_hat_j2,rmse_tau_hat_j3,rmse_tau_hat_j4,rmse_tau_hat_j5,rmse_tau_fri_j0,rmse_tau_fri_j1,rmse_tau_fri_j2,rmse_tau_fri_j3,rmse_tau_fri_j4,rmse_tau_fri_j5
+fo_cascade_pinn_net,fo_cascade_pinn,/home/coral/project/DeLaN_Stribeck/checkpoints/fo_cascade_pinn_net.pt,q l,4038,0.262953,0.230995,0.285329,0.373006,0.359981,0.151446,0.152302,0.136386,0.266903,0.325582,0.280659,0.148029,0.148238,0.142317
+stribeck_net,stribeck,/home/coral/project/DeLaN_Stribeck/checkpoints/stribeck_net.pt,q l,4038,1.721765,0.235410,2.478698,2.856201,1.858816,0.124006,0.076421,0.092617,0.348921,0.363732,0.247795,0.088936,0.071206,0.063870
+tcn_net,tcn,/home/coral/project/DeLaN_Stribeck/checkpoints/tcn_net.pt,q l,4038,1.318001,15.482884,2.630820,1.336434,0.980643,0.601186,0.453659,0.431950,2.000745,37.831780,1.573788,0.536041,0.449816,0.324201
