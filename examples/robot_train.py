@@ -206,15 +206,52 @@ def _save_checkpoint(
     print(f"已保存: {path.resolve()}")
 
 
-def _load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[MystericNet, dict]:
-    """与 robot_evaluate.load_mysteric_checkpoint 相同逻辑（避免重复维护）。"""
+def _load_eval_module():
+    """延迟加载 robot_evaluate（checkpoint / 训练过程绘图共用）。"""
     ev_path = Path(__file__).resolve().parent / "robot_evaluate.py"
     spec = importlib.util.spec_from_file_location("robot_evaluate", ev_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"无法加载 {ev_path}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.load_mysteric_checkpoint(path, device)
+    return mod
+
+
+def _load_mysteric_checkpoint(path: Path, device: torch.device) -> tuple[MystericNet, dict]:
+    """与 robot_evaluate.load_mysteric_checkpoint 相同逻辑（避免重复维护）。"""
+    return _load_eval_module().load_mysteric_checkpoint(path, device)
+
+
+@torch.no_grad()
+def _plot_train_progress(
+    model: MystericNet,
+    test_data: dict[str, np.ndarray],
+    traj_labels: list[str],
+    divider: list[int],
+    *,
+    figure_dir: Path,
+    friction_backend: str,
+    epoch: int,
+) -> None:
+    """在测试集上推理并保存曲线图（预测值为虚线）。"""
+    ev = _load_eval_module()
+    was_training = model.training
+    model.eval()
+    pred = ev.predict(model, test_data, next(model.parameters()).device)
+    if was_training:
+        model.train()
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    figure_out = figure_dir / f"{friction_backend}_train.png"
+    ev.plot_results(
+        test_data,
+        pred,
+        traj_labels,
+        divider,
+        figure_out=figure_out,
+        show=False,
+        pred_ls="--",
+        title_suffix=f"  (epoch {epoch})",
+    )
 
 
 def _resume_start_epoch(ckpt: dict, path: Path) -> int:
@@ -473,6 +510,24 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="阶段 3（仅 L-Net）学习率，默认与 --lr 相同",
+    )
+    p.add_argument(
+        "--plot-epoch-interval",
+        type=int,
+        default=10,
+        metavar="N",
+        help="每 N 个 epoch 在测试集上绘图（预测虚线）；0=关闭（默认 10）",
+    )
+    p.add_argument(
+        "--figure-dir",
+        type=Path,
+        default=ROOT / "figures" / "train_progress",
+        help="训练过程图保存目录（{backend}_train.png 每轮覆盖更新）",
+    )
+    p.add_argument(
+        "--no-train-plot",
+        action="store_true",
+        help="关闭训练过程绘图",
     )
     return p.parse_args()
 
@@ -746,6 +801,16 @@ def main() -> None:
     n_dof = test_qp.shape[1]
 
     raw = load_pickle_trajectories(str(args.data))
+    plot_interval = max(0, int(args.plot_epoch_interval))
+    use_train_plot = plot_interval > 0 and not args.no_train_plot
+    plot_test_data: dict[str, np.ndarray] | None = None
+    plot_traj_labels: list[str] = []
+    plot_divider: list[int] = []
+    if use_train_plot:
+        ev = _load_eval_module()
+        plot_test_data, plot_traj_labels, plot_divider = ev.build_test_tensors(
+            raw, list(args.test_labels), args.seq_len, device
+        )
     if args.friction_label == "auto":
         supervise_fri = pickle_has_mcg_decomposition(raw)
     else:
@@ -1120,6 +1185,12 @@ def main() -> None:
             if not args.no_loss_log
             else "  loss CSV: 已关闭（--no-loss-log）\n"
         )
+        + (
+            f"  训练绘图 → {args.figure_dir.resolve()}/"
+            f"{args.friction_backend}_train.png（每 {plot_interval} epoch，预测虚线）\n"
+            if use_train_plot
+            else "  训练绘图: 已关闭\n"
+        )
     )
 
     epoch_times: list[float] = []
@@ -1399,6 +1470,25 @@ def main() -> None:
                     l_d=l_d,
                     epoch=epoch,
                     interrupted=False,
+                )
+
+            if (
+                use_train_plot
+                and plot_test_data is not None
+                and (
+                    epoch == 1
+                    or epoch % plot_interval == 0
+                    or epoch == total_ep
+                )
+            ):
+                _plot_train_progress(
+                    model,
+                    plot_test_data,
+                    plot_traj_labels,
+                    plot_divider,
+                    figure_dir=args.figure_dir,
+                    friction_backend=args.friction_backend,
+                    epoch=epoch,
                 )
 
     except KeyboardInterrupt:

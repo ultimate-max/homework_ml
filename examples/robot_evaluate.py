@@ -350,6 +350,8 @@ def plot_results(
     *,
     figure_out: Path,
     show: bool,
+    pred_ls: str = "-",
+    title_suffix: str = "",
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -365,10 +367,12 @@ def plot_results(
     n_rows = n_dof
     n_cols = 3 if has_phys else 2
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 2.2 * n_rows), squeeze=False)
-    if has_phys:
-        fig.suptitle("τ_fri pred | τ_fri SCV physics | τ total (core+fri vs meas)", fontsize=12)
-    else:
-        fig.suptitle("τ_fri pred | τ total (core+fri vs meas)", fontsize=12)
+    base_title = (
+        "τ_fri pred | τ_fri SCV physics | τ total (core+fri vs meas)"
+        if has_phys
+        else "τ_fri pred | τ total (core+fri vs meas)"
+    )
+    fig.suptitle(base_title + title_suffix, fontsize=12)
 
     ticks = [(divider[i] + divider[i + 1]) / 2 for i in range(len(labels))]
     x = np.arange(tau.shape[0])
@@ -376,7 +380,9 @@ def plot_results(
     for j in range(n_dof):
         col = 0
         ax = axes[j, col]
-        ax.plot(x, tau_fri[:, j], "r", alpha=0.85, label="τ_fri pred (MLP/SCV/TCN)")
+        ax.plot(
+            x, tau_fri[:, j], "r", alpha=0.85, ls=pred_ls, label="τ_fri pred (MLP/SCV/TCN)"
+        )
         if has_true_fri:
             ax.plot(x, tau_fri_true[:, j], "k", alpha=0.7, label="τ_fri ref (τ-m-c-g)")
         ax.set_ylabel(f"J{j} [Nm]")
@@ -396,7 +402,7 @@ def plot_results(
             col += 1
             axp = axes[j, col]
             axp.plot(x, pred["tau_fri_phys"][:, j], "b", alpha=0.85, label="τ_fri SCV")
-            axp.plot(x, tau_fri[:, j], "r", alpha=0.5, ls="--", label="τ_fri pred")
+            axp.plot(x, tau_fri[:, j], "r", alpha=0.5, ls=pred_ls, label="τ_fri pred")
             if j == 0:
                 axp.set_title("PINN physics branch")
             if j == n_dof - 1:
@@ -412,7 +418,7 @@ def plot_results(
         col = n_cols - 1
         axt = axes[j, col]
         axt.plot(x, tau[:, j], "k", alpha=0.8, label="τ meas")
-        axt.plot(x, tau_hat[:, j], "r", alpha=0.75, label="τ_hat")
+        axt.plot(x, tau_hat[:, j], "r", alpha=0.75, ls=pred_ls, label="τ_hat")
         axt.plot(x, tau_core[:, j], "g", alpha=0.5, ls=":", label="τ_core")
         if j == 0:
             axt.set_title("Total torque")
